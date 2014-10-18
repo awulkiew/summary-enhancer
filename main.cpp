@@ -162,12 +162,12 @@ struct logs_pool
     struct element
     {
         element(fail_iterator it_, client_type::response const& response_)
-            : fail_it(it_), response(response_), is_active(true)
+            : fail_it(it_), response(response_), counter(0)
         {}
 
         fail_iterator fail_it;
         client_type::response response;
-        bool is_active;
+        int counter;
     };
 
     struct log_info
@@ -184,6 +184,7 @@ struct logs_pool
 
     logs_pool(std::size_t max_requests_ = 10)
         : max_requests(max_requests_)
+        , max_retries(3)
     {}
 
     fail_iterator add(fail_iterator first, fail_iterator last)
@@ -207,17 +208,31 @@ struct logs_pool
         {
             if ( boost::network::http::ready(it->response) )
             {
-                it->is_active = false;
-
                 std::string body;
 
                 try
                 {
                     body = boost::network::http::body(it->response);
+                    it->counter = -1;
                 }
                 catch (std::exception & e)
                 {
-                    std::cerr << "ERROR! " << e.what() << std::endl;
+                    // re-try
+                    if ( it->counter < max_retries )
+                    {
+                        client_type::request request(it->fail_it->log_url);
+                        request << boost::network::header("Host", "www.boost.org");
+                        request << boost::network::header("Connection", "keep-alive");
+                        it->response = client.get(request);
+                        it->counter++;
+
+                        std::cout << "Retrying!" << std::endl;
+                    }
+                    else
+                    {
+                        std::cerr << "ERROR! " << e.what() << std::endl;
+                        it->counter = -1;
+                    }
                 }
 
                 *out++ = log_info(it->fail_it, body);
@@ -228,8 +243,9 @@ struct logs_pool
         responses.erase(it, responses.end());
     }
 
-    static bool is_not_active(element const& el) { return !el.is_active; }
+    static bool is_not_active(element const& el) { return el.counter < 0; }
 
+    int max_retries;
     std::size_t max_requests;
     client_type client;
     std::vector<element> responses;
@@ -352,7 +368,7 @@ inline void process_document(std::string const& name, std::string & in, std::str
     doc.parse<0>(&in[0]); // non-98-standard but should work
 
     fail_nodes nodes(doc);
-    logs_pool pool(20);
+    logs_pool pool(50);
 
     fail_nodes::iterator it = nodes.begin();
     

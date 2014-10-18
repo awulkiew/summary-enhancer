@@ -249,8 +249,12 @@ inline void modify_nodes(rapidxml::xml_document<> & doc,
 
         set_value(doc, n.a, "time");
     }
-    // File too big
-    else if ( log.find("File too big") != std::string::npos )
+    // File too big or /bigobj
+    else if ( ! boost::empty( boost::algorithm::find_regex(
+                    log,
+                    boost::basic_regex<char>("((File too big)|(/bigobj))"),
+                    boost::match_not_dot_newline
+                )) )
     {
         rapidxml::xml_attribute<> * style_attr = doc.allocate_attribute("style", "background-color: #00ff88;");
         n.td->append_attribute(style_attr);

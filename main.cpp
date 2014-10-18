@@ -213,7 +213,6 @@ struct logs_pool
                 try
                 {
                     body = boost::network::http::body(it->response);
-                    it->counter = -1;
                 }
                 catch (std::exception & e)
                 {
@@ -227,15 +226,16 @@ struct logs_pool
                         it->counter++;
 
                         std::cout << "Retrying!" << std::endl;
+                        continue;
                     }
                     else
                     {
                         std::cerr << "ERROR! " << e.what() << std::endl;
-                        it->counter = -1;
                     }
                 }
 
                 *out++ = log_info(it->fail_it, body);
+                it->counter = -1;
             }
         }
 

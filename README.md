@@ -27,14 +27,20 @@ Failures list:
 
 Usage:
 
-    program lib_name...
-    
+    summary-enhancer [OPTIONS] library...
+
+Pass space separated list of libraries. In sublibs names use dash instead of slash, e.g. geometry-index
+
 Example:
 
-    program geometry geometry-index geometry-extensions
-    
-Pass space-separated list of libraries. In sublibs names use dash instead of slash, e.g. geometry-index.
+    summary-enhancer geometry geometry-index geometry-extensions
 
+Options:
+
+    --help                 produce help message
+    --connections arg (=5) max number of connections [1..100]
+    --retries arg (=3)     max number of retries [1..10]
+    
 ================
 
 To compile the code, the following libraries are required:

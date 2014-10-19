@@ -11,6 +11,7 @@
 
 #include <boost/filesystem.hpp>
 #include <boost/algorithm/string/regex.hpp>
+#include <boost/program_options.hpp>
 
 #include <boost/network.hpp>
 
@@ -22,6 +23,66 @@ std::string const branch = "develop";
 std::string const view = "developer";
 std::string const branch_url = tests_url + branch + "/";
 std::string const view_url = branch_url + view + "/";
+
+struct options
+{
+    options()
+        : connections(5)
+        , retries(3)
+    {}
+
+    unsigned short connections;
+    unsigned short retries;
+};
+
+bool process_input(int argc, char **argv, options & s, std::vector<std::string> & libraries)
+{
+    try
+    {
+        std::stringstream msg;
+        msg << "Usage: summary-enhancer [OPTIONS] library...\n\n";
+        msg << "Pass space separated list of libraries. In sublibs names use dash instead of slash, e.g. geometry-index\n\n";
+        msg << "Example: summary-enhancer geometry geometry-index geometry-extensions\n\n";
+        msg << "Options";
+
+        namespace po = boost::program_options;
+        po::options_description desc(msg.str());
+        desc.add_options()
+            ("help", "produce help message")
+            ("connections", po::value<int>()->default_value(s.connections), "max number of connections [1..100]")
+            ("retries", po::value<int>()->default_value(s.retries), "max number of retries [1..10]")
+            ;
+
+        po::parsed_options parsed = 
+            po::command_line_parser(argc, argv).options(desc).allow_unregistered().run();
+        libraries = collect_unrecognized(parsed.options, po::include_positional);
+
+        po::variables_map vm;
+        po::store(parsed, vm);
+        po::notify(vm);    
+
+        if ( argc <= 1 || vm.count("help") || libraries.empty() )
+        {
+            std::cout << desc << "\n";
+            return false;
+        }
+
+        int c = vm["connections"].as<int>();
+        if ( 1 <= c && c <= 100 )
+            s.connections = static_cast<unsigned short>(c);
+
+        int r = vm["retries"].as<int>();
+        if ( 1 <= r && r <= 10 )
+            s.retries = static_cast<unsigned short>(r);
+    }
+    catch (std::exception & e)
+    {
+        std::cerr << "Error processing options: " << e.what() << std::endl;
+        return false;
+    }
+
+    return true;
+}
 
 inline std::string get_document(std::string const& url, std::string & error_msg)
 {
@@ -182,9 +243,9 @@ struct logs_pool
 
     typedef std::vector<element>::iterator response_iterator;
 
-    logs_pool(std::size_t max_requests_ = 10)
-        : max_requests(max_requests_)
-        , max_retries(3)
+    logs_pool(unsigned short connections, unsigned short retries)
+        : max_requests(connections)
+        , max_retries(retries)
     {}
 
     fail_iterator add(fail_iterator first, fail_iterator last)
@@ -358,7 +419,7 @@ inline void print_log_urls(fail_nodes::iterator first, fail_nodes::iterator last
     }
 }
 
-inline void process_document(std::string const& name, std::string & in, std::string & out)
+inline void process_document(std::string const& name, std::string & in, std::string & out, options const& options_)
 {
     out.clear();
     if ( in.empty() )
@@ -368,7 +429,7 @@ inline void process_document(std::string const& name, std::string & in, std::str
     doc.parse<0>(&in[0]); // non-98-standard but should work
 
     fail_nodes nodes(doc);
-    logs_pool pool(50);
+    logs_pool pool(options_.connections, options_.retries);
 
     fail_nodes::iterator it = nodes.begin();
     
@@ -401,14 +462,10 @@ inline void process_document(std::string const& name, std::string & in, std::str
 
 int main(int argc, char **argv)
 {
-    if ( argc <= 1 || argc == 2 && argv[1] == std::string("--help") )
-    {
-        std::cout << "Usage: program library...\n\n";
-        std::cout << "Example: program geometry geometry-index geometry-extensions\n\n";
-        std::cout << "Pass space separated list of libraries. In sublibs names use dash instead of slash, e.g. geometry-index";
-        std::cout << std::endl;
-        return 0;
-    }
+    std::vector<std::string> libraries;
+    options options_;
+    if ( !process_input(argc, argv, options_, libraries) )
+        return 1;
 
     // prepare the environment
     try
@@ -456,9 +513,10 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    for ( int i = 1 ; i < argc ; ++i )
+    for ( std::vector<std::string>::iterator it = libraries.begin() ;
+          it != libraries.end() ; ++it )
     {
-        std::string lib = argv[i];
+        std::string const& lib = *it;
         std::string url = view_url + lib + "_.html";
 
         std::cout << "Downloading: " << lib << std::endl;
@@ -476,7 +534,7 @@ int main(int argc, char **argv)
         // process the summary page
         std::string processed_body;
 
-        process_document(lib, body, processed_body);
+        process_document(lib, body, processed_body, options_);
 
         // save processed summary page
         std::ofstream of(std::string("result/") + lib + ".html", std::ios::trunc);

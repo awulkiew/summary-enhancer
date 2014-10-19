@@ -18,24 +18,38 @@
 #include "rapidxml/rapidxml.hpp"
 #include "rapidxml/rapidxml_print.hpp"
 
-std::string const tests_url = "http://www.boost.org/development/tests/";
-std::string const branch = "develop";
-std::string const view = "developer";
-std::string const branch_url = tests_url + branch + "/";
-std::string const view_url = branch_url + view + "/";
-
 struct options
 {
     options()
         : connections(5)
         , retries(3)
-    {}
+        , tests_url("http://www.boost.org/development/tests/")
+        , branch("develop")
+        , view("developer")
+    {
+        refresh();
+    }
+
+    void refresh()
+    {
+        branch_url = tests_url + branch + "/";
+        view_url = branch_url + view + "/";
+    }
 
     unsigned short connections;
     unsigned short retries;
+
+    std::string tests_url;
+    std::string branch;
+    std::string view;
+
+    std::string branch_url;
+    std::string view_url;
+
+    std::vector<std::string> libraries;
 };
 
-bool process_input(int argc, char **argv, options & s, std::vector<std::string> & libraries)
+bool process_options(int argc, char **argv, options & op)
 {
     try
     {
@@ -49,39 +63,61 @@ bool process_input(int argc, char **argv, options & s, std::vector<std::string> 
         po::options_description desc(msg.str());
         desc.add_options()
             ("help", "produce help message")
-            ("connections", po::value<int>()->default_value(s.connections), "max number of connections [1..100]")
-            ("retries", po::value<int>()->default_value(s.retries), "max number of retries [1..10]")
+            ("connections", po::value<int>()->default_value(op.connections), "max number of connections [1..100]")
+            ("retries", po::value<int>()->default_value(op.retries), "max number of retries [1..10]")
+            ("branch", po::value<std::string>()->default_value(op.branch), "branch name {develop, master}")
             ;
 
         po::parsed_options parsed = 
             po::command_line_parser(argc, argv).options(desc).allow_unregistered().run();
-        libraries = collect_unrecognized(parsed.options, po::include_positional);
+        op.libraries = collect_unrecognized(parsed.options, po::include_positional);
 
         po::variables_map vm;
         po::store(parsed, vm);
         po::notify(vm);    
 
-        if ( argc <= 1 || vm.count("help") || libraries.empty() )
+        if ( argc <= 1 || vm.count("help") || op.libraries.empty() )
         {
             std::cout << desc << "\n";
             return false;
         }
 
+        bool result = true;
+
         int c = vm["connections"].as<int>();
-        if ( 1 <= c && c <= 100 )
-            s.connections = static_cast<unsigned short>(c);
+        if ( c < 1 || 100 < c )
+        {
+            std::cerr << "Invalid connections value" << std::endl;
+            result = false;
+        }
+        op.connections = static_cast<unsigned short>(c);
 
         int r = vm["retries"].as<int>();
-        if ( 1 <= r && r <= 10 )
-            s.retries = static_cast<unsigned short>(r);
+        if ( r < 1 || 10 < r )
+        {
+            std::cerr << "Invalid retries value" << std::endl;
+            result = false;
+        }
+        op.retries = static_cast<unsigned short>(r);
+
+        std::string b = vm["branch"].as<std::string>();
+        if ( b != "develop" && b != "master" )
+        {
+            std::cerr << "Invalid branch" << std::endl;
+            result = false;
+        }
+        op.branch = b;
+
+        op.refresh();
+
+        return result;
     }
     catch (std::exception & e)
     {
         std::cerr << "Error processing options: " << e.what() << std::endl;
-        return false;
     }
 
-    return true;
+    return false;
 }
 
 inline std::string get_document(std::string const& url, std::string & error_msg)
@@ -163,13 +199,13 @@ struct fail_nodes
 {
     typedef std::vector<fail_node> base_t;
 
-    fail_nodes(rapidxml::xml_document<> & doc)
+    fail_nodes(rapidxml::xml_document<> & doc, options const& op)
     {
-        gather_nodes(doc.first_node());
+        gather_nodes(doc.first_node(), op);
     }
 
 private:
-    inline void gather_nodes(rapidxml::xml_node<> * n)
+    inline void gather_nodes(rapidxml::xml_node<> * n, options const& op)
     {
         if ( n == NULL )
             return;
@@ -200,7 +236,7 @@ private:
                                 href.erase(href.begin());
                             }
 
-                            href = branch_url + href;
+                            href = op.branch_url + href;
                         }
 
                         this->push_back(fail_node(n, anch, href_attr, href));
@@ -210,8 +246,8 @@ private:
         }
 
         // depth first
-        gather_nodes(n->first_node());
-        gather_nodes(n->next_sibling());
+        gather_nodes(n->first_node(), op);
+        gather_nodes(n->next_sibling(), op);
     }
 };
 
@@ -243,9 +279,9 @@ struct logs_pool
 
     typedef std::vector<element>::iterator response_iterator;
 
-    logs_pool(unsigned short connections, unsigned short retries)
-        : max_requests(connections)
-        , max_retries(retries)
+    logs_pool(options const& op)
+        : max_requests(op.connections)
+        , max_retries(op.retries)
     {}
 
     fail_iterator add(fail_iterator first, fail_iterator last)
@@ -419,7 +455,7 @@ inline void print_log_urls(fail_nodes::iterator first, fail_nodes::iterator last
     }
 }
 
-inline void process_document(std::string const& name, std::string & in, std::string & out, options const& options_)
+inline void process_document(std::string const& name, std::string & in, std::string & out, options const& op)
 {
     out.clear();
     if ( in.empty() )
@@ -428,8 +464,8 @@ inline void process_document(std::string const& name, std::string & in, std::str
     rapidxml::xml_document<> doc;
     doc.parse<0>(&in[0]); // non-98-standard but should work
 
-    fail_nodes nodes(doc);
-    logs_pool pool(options_.connections, options_.retries);
+    fail_nodes nodes(doc, op);
+    logs_pool pool(op);
 
     fail_nodes::iterator it = nodes.begin();
     
@@ -462,9 +498,9 @@ inline void process_document(std::string const& name, std::string & in, std::str
 
 int main(int argc, char **argv)
 {
-    std::vector<std::string> libraries;
-    options options_;
-    if ( !process_input(argc, argv, options_, libraries) )
+    // process program options
+    options op;
+    if ( !process_options(argc, argv, op) )
         return 1;
 
     // prepare the environment
@@ -477,12 +513,12 @@ int main(int argc, char **argv)
             std::cout << "Downloading style." << std::endl;
 
             std::string error_msg;
-            std::string body = get_document(branch_url + "master.css", error_msg);
+            std::string body = get_document("http://www.boost.org/development/tests/develop/master.css", error_msg);
             if ( !error_msg.empty() )
             {
                 std::cerr << "ERROR downloading style! " << std::endl;
                 std::cerr << error_msg << std::endl;
-                std::cerr << "Try downloading it manually e.g. from http://www.boost.org/development/tests/develop/master.css and placing in the working directory." << std::endl;
+                std::cerr << "You may try to download it manually from http://www.boost.org/development/tests/develop/master.css and place it in the working directory." << std::endl;
                 return 1;
             }
             std::ofstream of("master.css", std::ios::trunc);
@@ -513,11 +549,12 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    for ( std::vector<std::string>::iterator it = libraries.begin() ;
-          it != libraries.end() ; ++it )
+    // process all libraries
+    for ( std::vector<std::string>::iterator it = op.libraries.begin() ;
+          it != op.libraries.end() ; ++it )
     {
         std::string const& lib = *it;
-        std::string url = view_url + lib + "_.html";
+        std::string url = op.view_url + lib + "_.html";
 
         std::cout << "Downloading: " << lib << std::endl;
         
@@ -534,7 +571,7 @@ int main(int argc, char **argv)
         // process the summary page
         std::string processed_body;
 
-        process_document(lib, body, processed_body, options_);
+        process_document(lib, body, processed_body, op);
 
         // save processed summary page
         std::ofstream of(std::string("result/") + lib + ".html", std::ios::trunc);

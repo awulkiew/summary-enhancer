@@ -37,9 +37,10 @@ Example:
 
 Options:
 
-    --help                 produce help message
-    --connections arg (=5) max number of connections [1..100]
-    --retries arg (=3)     max number of retries [1..10]
+    --help                  produce help message
+    --connections arg (=5)  max number of connections [1..100]
+    --retries arg (=3)      max number of retries [1..10]
+    --branch arg (=develop) branch name {develop, master}
     
 ================
 

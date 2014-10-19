@@ -29,7 +29,7 @@ Usage:
 
     summary-enhancer [OPTIONS] library...
 
-Pass space separated list of libraries. In sublibs names use dash instead of slash, e.g. geometry-index
+Pass space separated list of libraries. In sublibs names use hyphen (-) instead of slash (/), e.g. geometry-index
 
 Example:
 

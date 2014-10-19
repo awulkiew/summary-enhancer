@@ -55,7 +55,7 @@ The program does the following steps:
 
   1. download required CSS file
   2. create output "result" directory
-  3. for all passed summary pages
+  3. for each passed library/sublib
     1. download summary page
     2. for each failed test
       1. download the log

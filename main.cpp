@@ -348,11 +348,16 @@ struct logs_pool
     std::vector<element> responses;
 };
 
+std::string filename_from_url(std::string const& url)
+{
+    return url.substr(url.find_last_of('/') + 1);
+}
+
 inline void modify_nodes(rapidxml::xml_document<> & doc,
                          fail_node & n,
                          std::string const& log)
 {
-    std::cout << "Processing: " << n.log_url.substr(n.log_url.find_last_of('/') + 1) << std::endl;
+    std::cout << "Processing: " << filename_from_url(n.log_url) << std::endl;
     
     // time limit exceeded
     if ( log.find("second time limit exceeded") != std::string::npos )
@@ -446,15 +451,6 @@ inline void process_fail(rapidxml::xml_document<> & doc, fail_node & n, std::str
     modify_nodes(doc, n, log);
 }
 
-inline void print_log_urls(fail_nodes::iterator first, fail_nodes::iterator last)
-{
-    // Print
-    for ( ; first != last ; ++first )
-    {
-        std::cout << "Downloading: " << first->log_url.substr(first->log_url.find_last_of('/') + 1) << std::endl;
-    }
-}
-
 inline void process_document(std::string const& name, std::string & in, std::string & out, options const& op)
 {
     out.clear();
@@ -471,11 +467,12 @@ inline void process_document(std::string const& name, std::string & in, std::str
     
     while ( it != nodes.end() || !pool.responses.empty() )
     {
-        // new portion
+        // new portion of logs
         fail_nodes::iterator new_it = pool.add(it, nodes.end());
 
-        print_log_urls(it, new_it);
-        it = new_it;
+        // print log names and move "it" iterator to a new position
+        for ( ; it != new_it ; ++it )
+            std::cout << "Downloading: " << filename_from_url(it->log_url) << std::endl;
 
         // wait a while
         boost::this_thread::sleep(boost::posix_time::milliseconds(100));

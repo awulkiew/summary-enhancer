@@ -59,7 +59,7 @@ bool process_options(int argc, char **argv, options & op)
     {
         std::stringstream msg;
         msg << "Usage: summary-enhancer [OPTIONS] library...\n\n";
-        msg << "Pass space separated list of libraries. In sublibs names use dash instead of slash, e.g. geometry-index\n\n";
+        msg << "Pass space separated list of libraries. In sublibs names use hyphen (-) instead of slash (/), e.g. geometry-index\n\n";
         msg << "Example: summary-enhancer geometry geometry-index geometry-extensions\n\n";
         msg << "Options";
 

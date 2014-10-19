@@ -21,7 +21,8 @@
 struct options
 {
     options()
-        : connections(5)
+        : verbose(false)
+        , connections(5)
         , retries(3)
         , tests_url("http://www.boost.org/development/tests/")
         , branch("develop")
@@ -36,6 +37,7 @@ struct options
         view_url = branch_url + view + "/";
     }
 
+    bool verbose;
     unsigned short connections;
     unsigned short retries;
 
@@ -66,6 +68,7 @@ bool process_options(int argc, char **argv, options & op)
             ("connections", po::value<int>()->default_value(op.connections), "max number of connections [1..100]")
             ("retries", po::value<int>()->default_value(op.retries), "max number of retries [1..10]")
             ("branch", po::value<std::string>()->default_value(op.branch), "branch name {develop, master}")
+            ("verbose", "show details")
             ;
 
         po::parsed_options parsed = 
@@ -83,6 +86,9 @@ bool process_options(int argc, char **argv, options & op)
         }
 
         bool result = true;
+
+        if ( vm.count("verbose") )
+            op.verbose = true;
 
         int c = vm["connections"].as<int>();
         if ( c < 1 || 100 < c )
@@ -282,6 +288,7 @@ struct logs_pool
     logs_pool(options const& op)
         : max_requests(op.connections)
         , max_retries(op.retries)
+        , verbose(op.verbose)
     {}
 
     fail_iterator add(fail_iterator first, fail_iterator last)
@@ -322,7 +329,9 @@ struct logs_pool
                         it->response = client.get(request);
                         it->counter++;
 
-                        std::cout << "Retrying!" << std::endl;
+                        if ( verbose )
+                            std::cout << "Retrying!" << std::endl;
+
                         continue;
                     }
                     else
@@ -344,6 +353,8 @@ struct logs_pool
 
     int max_retries;
     std::size_t max_requests;
+    bool verbose;
+
     client_type client;
     std::vector<element> responses;
 };
@@ -355,9 +366,11 @@ std::string filename_from_url(std::string const& url)
 
 inline void modify_nodes(rapidxml::xml_document<> & doc,
                          fail_node & n,
-                         std::string const& log)
+                         std::string const& log,
+                         options const& op)
 {
-    std::cout << "Processing: " << filename_from_url(n.log_url) << std::endl;
+    if ( op.verbose )
+        std::cout << "Processing: " << filename_from_url(n.log_url) << std::endl;
     
     // time limit exceeded
     if ( log.find("second time limit exceeded") != std::string::npos )
@@ -437,7 +450,7 @@ inline void modify_nodes(rapidxml::xml_document<> & doc,
     }
 }
 
-inline void process_fail(rapidxml::xml_document<> & doc, fail_node & n, std::string const& log)
+inline void process_fail(rapidxml::xml_document<> & doc, fail_node & n, std::string const& log, options const& op)
 {
     // remove spaces
     while ( n.td->first_node("") )
@@ -448,7 +461,7 @@ inline void process_fail(rapidxml::xml_document<> & doc, fail_node & n, std::str
     // set new, global href
     n.href->value( doc.allocate_string(n.log_url.c_str()) );
 
-    modify_nodes(doc, n, log);
+    modify_nodes(doc, n, log, op);
 }
 
 inline void process_document(std::string const& name, std::string & in, std::string & out, options const& op)
@@ -470,9 +483,15 @@ inline void process_document(std::string const& name, std::string & in, std::str
         // new portion of logs
         fail_nodes::iterator new_it = pool.add(it, nodes.end());
 
-        // print log names and move "it" iterator to a new position
-        for ( ; it != new_it ; ++it )
-            std::cout << "Downloading: " << filename_from_url(it->log_url) << std::endl;
+        // print log names
+        if ( op.verbose )
+        {
+            for ( ; it != new_it ; ++it )
+                std::cout << "Downloading: " << filename_from_url(it->log_url) << std::endl;
+        }
+
+        // move "it" iterator to a new position
+        it = new_it;
 
         // wait a while
         boost::this_thread::sleep(boost::posix_time::milliseconds(100));
@@ -484,7 +503,7 @@ inline void process_document(std::string const& name, std::string & in, std::str
         for ( std::vector<logs_pool::log_info>::iterator log_it = logs.begin() ;
               log_it != logs.end() ; ++log_it )
         {
-            process_fail(doc, *(log_it->fail_it), log_it->log);
+            process_fail(doc, *(log_it->fail_it), log_it->log, op);
         }
     }
 
@@ -565,13 +584,15 @@ int main(int argc, char **argv)
             continue;
         }
 
+        std::cout << "Processing." << std::endl;
+
         // process the summary page
         std::string processed_body;
 
         process_document(lib, body, processed_body, op);
 
         // save processed summary page
-        std::ofstream of(std::string("result/") + lib + ".html", std::ios::trunc);
+        std::ofstream of(std::string("result/") + op.branch + '-' + lib + ".html", std::ios::trunc);
         of << processed_body;
         of.close();
     }

@@ -5,7 +5,7 @@ Program downloading Boost libraries regression summary pages and enhancing them 
 
 ================
 
-The goal is to change this page of equally-displayed failures:
+The purpose is to change this page of equally-displayed failures:
 
 ![Before](before.png)
 

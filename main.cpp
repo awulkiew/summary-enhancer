@@ -9,14 +9,16 @@
 #include <iostream>
 #include <vector>
 
-#include <boost/filesystem.hpp>
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/regex.hpp>
+#include <boost/filesystem.hpp>
 #include <boost/program_options.hpp>
 
 #include <boost/network.hpp>
 
 #include "rapidxml/rapidxml.hpp"
 #include "rapidxml/rapidxml_print.hpp"
+
 
 struct options
 {
@@ -126,7 +128,7 @@ bool process_options(int argc, char **argv, options & op)
     return false;
 }
 
-inline std::string get_document(std::string const& url, std::string & error_msg)
+std::string get_document(std::string const& url, std::string & error_msg)
 {
     std::string body;
 
@@ -159,7 +161,7 @@ inline std::string get_document(std::string const& url, std::string & error_msg)
 }
 
 template <typename NorA>
-inline std::string name(NorA * n)
+std::string name(NorA * n)
 {
     if ( n )
         return std::string(n->name(), n->name_size());
@@ -168,7 +170,7 @@ inline std::string name(NorA * n)
 }
 
 template <typename NorA>
-inline std::string value(NorA * n)
+std::string value(NorA * n)
 {
     if ( n )
         return std::string(n->value(), n->value_size());
@@ -177,7 +179,7 @@ inline std::string value(NorA * n)
 }
 
 template <typename NorA>
-inline void set_value(rapidxml::xml_document<> & doc, NorA * n, const char* v)
+void set_value(rapidxml::xml_document<> & doc, NorA * n, const char* v)
 {
     char * cstr = doc.allocate_string(v);
 
@@ -200,18 +202,51 @@ struct fail_node
     std::string log_url;
 };
 
-struct fail_nodes
-    : public std::vector<fail_node>
+struct anchor_node
 {
-    typedef std::vector<fail_node> base_t;
+    anchor_node(rapidxml::xml_node<> * a_,
+                rapidxml::xml_attribute<> * href_,
+                std::string const& url_)
+        : a(a_), href(href_), url(url_)
+    {}
+    rapidxml::xml_node<> * a;
+    rapidxml::xml_attribute<> * href;
+    std::string url;
+};
 
-    fail_nodes(rapidxml::xml_document<> & doc, options const& op)
+bool not_slash(char c) { return c != '/' && c != '\\'; }
+
+std::string to_global(std::string const& url, std::string const& global_prefix)
+{
+    // not global url
+    if ( !boost::starts_with(url, "http://") &&
+         !boost::starts_with(url, "https://") )
+    {
+        std::string::const_iterator it = std::find_if(url.begin(), url.end(), not_slash);
+        return global_prefix + std::string(it, url.end());
+    }
+
+    return url;
+}
+
+struct nodes_containers
+{
+    typedef std::vector<fail_node> fails_container;
+    typedef fails_container::iterator fails_iterator;
+
+    typedef std::vector<anchor_node> anchors_container;
+    typedef anchors_container::iterator anchors_iterator;
+
+    nodes_containers(rapidxml::xml_document<> & doc, options const& op)
     {
         gather_nodes(doc.first_node(), op);
     }
 
+    fails_container fails;
+    anchors_container non_log_anchors;
+
 private:
-    inline void gather_nodes(rapidxml::xml_node<> * n, options const& op)
+    void gather_nodes(rapidxml::xml_node<> * n, options const& op)
     {
         if ( n == NULL )
             return;
@@ -231,23 +266,22 @@ private:
                     if ( href_attr )
                     {
                         // "fail link"
-                        std::string href = value(href_attr);
-
-                        // make global URL from local URL
-                        if ( href.find("http://") == std::string::npos )
-                        {
-                            // remove prefixing '/'
-                            while ( !href.empty() && href[0] == '/' )
-                            {
-                                href.erase(href.begin());
-                            }
-
-                            href = op.branch_url + href;
-                        }
-
-                        this->push_back(fail_node(n, anch, href_attr, href));
+                        std::string global_href = to_global(value(href_attr), op.branch_url);
+                        fails.push_back(fail_node(n, anch, href_attr, global_href));
                     }
                 }
+            }
+        }
+
+        // non-fail/log <a>
+        if ( "a" == name(n) )
+        {
+            rapidxml::xml_attribute<> * class_attr = n->first_attribute("class");
+            rapidxml::xml_attribute<> * href_attr = n->first_attribute("href");
+            if ( ( class_attr == NULL || value(class_attr) != "log-link") && href_attr )
+            {
+                std::string global_href = to_global(value(href_attr), op.view_url);
+                non_log_anchors.push_back(anchor_node(n, href_attr, global_href));
             }
         }
 
@@ -364,10 +398,10 @@ std::string filename_from_url(std::string const& url)
     return url.substr(url.find_last_of('/') + 1);
 }
 
-inline void modify_nodes(rapidxml::xml_document<> & doc,
-                         fail_node & n,
-                         std::string const& log,
-                         options const& op)
+void modify_nodes(rapidxml::xml_document<> & doc,
+                  fail_node & n,
+                  std::string const& log,
+                  options const& op)
 {
     if ( op.verbose )
         std::cout << "Processing: " << filename_from_url(n.log_url) << std::endl;
@@ -450,7 +484,7 @@ inline void modify_nodes(rapidxml::xml_document<> & doc,
     }
 }
 
-inline void process_fail(rapidxml::xml_document<> & doc, fail_node & n, std::string const& log, options const& op)
+void process_fail(rapidxml::xml_document<> & doc, fail_node & n, std::string const& log, options const& op)
 {
     // remove spaces
     while ( n.td->first_node("") )
@@ -464,7 +498,13 @@ inline void process_fail(rapidxml::xml_document<> & doc, fail_node & n, std::str
     modify_nodes(doc, n, log, op);
 }
 
-inline void process_document(std::string const& name, std::string & in, std::string & out, options const& op)
+void process_anchor(rapidxml::xml_document<> & doc, anchor_node & n)
+{
+    // set new, global href
+    n.href->value( doc.allocate_string(n.url.c_str()) );
+}
+
+void process_document(std::string const& name, std::string & in, std::string & out, options const& op)
 {
     out.clear();
     if ( in.empty() )
@@ -473,15 +513,18 @@ inline void process_document(std::string const& name, std::string & in, std::str
     rapidxml::xml_document<> doc;
     doc.parse<0>(&in[0]); // non-98-standard but should work
 
-    fail_nodes nodes(doc, op);
-    logs_pool pool(op);
-
-    fail_nodes::iterator it = nodes.begin();
+    nodes_containers nodes(doc, op);
     
-    while ( it != nodes.end() || !pool.responses.empty() )
+    // process fails
+
+    logs_pool pool(op);
+    
+    nodes_containers::fails_iterator it = nodes.fails.begin();    
+
+    while ( it != nodes.fails.end() || !pool.responses.empty() )
     {
         // new portion of logs
-        fail_nodes::iterator new_it = pool.add(it, nodes.end());
+        nodes_containers::fails_iterator new_it = pool.add(it, nodes.fails.end());
 
         // print log names
         if ( op.verbose )
@@ -505,6 +548,13 @@ inline void process_document(std::string const& name, std::string & in, std::str
         {
             process_fail(doc, *(log_it->fail_it), log_it->log, op);
         }
+    }
+
+    // process anchors
+    for ( nodes_containers::anchors_iterator a_it = nodes.non_log_anchors.begin() ;
+          a_it != nodes.non_log_anchors.end() ; ++a_it )
+    {
+        process_anchor(doc, *a_it);
     }
 
     std::cout << "Saving: " << name << std::endl;

@@ -56,12 +56,11 @@ void expect_response(unsigned code, boost::asio::ip::tcp::socket & socket)
 
 void send(std::string const& host,
           std::string const& service,
+          std::string const& from,
           std::vector<std::string> const& recipients,
           std::string const& subject,
           std::string const& message)
 {
-    std::string from = "geometry-regression@boost.org";
-
     using boost::asio::ip::tcp;
 
     boost::asio::io_service io_service;
@@ -125,6 +124,7 @@ struct config
         {
             std::getline(mail_file, host);
             std::getline(mail_file, service);
+            std::getline(mail_file, from);
             while ( mail_file.good() )
             {
                 std::string recipient;
@@ -140,6 +140,7 @@ struct config
 
     std::string host;
     std::string service;
+    std::string from;
     std::vector<std::string> recipients;
 };
 

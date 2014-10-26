@@ -7,6 +7,7 @@
 
 #include <fstream>
 #include <iostream>
+#include <string>
 #include <vector>
 
 #include <boost/algorithm/string/predicate.hpp>
@@ -642,7 +643,8 @@ int main(int argc, char **argv)
         process_document(lib, body, processed_body, op);
 
         // save processed summary page
-        std::ofstream of(std::string("result/") + op.branch + '-' + lib + ".html", std::ios::trunc);
+        std::string of_name = std::string("result/") + op.branch + '-' + lib + ".html";
+        std::ofstream of(of_name.c_str(), std::ios::trunc);
         of << processed_body;
         of.close();
     }

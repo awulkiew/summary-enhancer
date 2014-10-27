@@ -10,7 +10,6 @@
 
 
 #include <fstream>
-//#include <iostream>
 #include <vector>
 #include <string>
 #include <sstream>
@@ -59,7 +58,8 @@ void send(std::string const& host,
           std::string const& from,
           std::vector<std::string> const& recipients,
           std::string const& subject,
-          std::string const& message)
+          std::string const& message,
+          bool is_html = false)
 {
     using boost::asio::ip::tcp;
 
@@ -100,13 +100,14 @@ void send(std::string const& host,
             ss << "\r\n";
     }
     //ss << "Date: Sat, 25 Oct 2014 04:00:00 +0200" << "\r\n";
-    //ss << "MIME-Version: 1.0" << "\r\n";
-    //ss << "Content-Type: text/plain; charset=UTF-8" << "\r\n";
+    ss << "MIME-Version: 1.0" << "\r\n";
+    if ( is_html )
+        ss << "Content-Type: text/html; charset=UTF-8" << "\r\n";
+    else
+        ss << "Content-Type: text/plain; charset=UTF-8" << "\r\n";
     ss << "Subject: " << subject <<  "\r\n";
     ss << "\r\n";
     ss << message;
-
-    //std::cout << ss.str();
 
     send_data(ss.str(), socket);
 
@@ -117,13 +118,14 @@ void send(std::string const& host,
 
 struct config
 {
-    config(std::string const& filename)
+    bool load(std::string const& filename)
     {
         std::ifstream mail_file(filename.c_str());
         if ( mail_file.is_open() )
         {
             std::getline(mail_file, host);
             std::getline(mail_file, service);
+            std::getline(mail_file, subject_tag);
             std::getline(mail_file, from);
             while ( mail_file.good() )
             {
@@ -134,15 +136,27 @@ struct config
             }
         }
 
-        if ( host.empty() || service.empty() || recipients.empty() )
-            throw std::runtime_error("couldn't load config");
+        if ( host.empty() || service.empty() || from.empty() || recipients.empty() )
+            return false;
+
+        return true;
     }
 
     std::string host;
     std::string service;
+    std::string subject_tag;
     std::string from;
     std::vector<std::string> recipients;
 };
+
+void send(config const& cfg,
+          std::string const& subject,
+          std::string const& message,
+          bool is_html = false)
+{
+    std::string subject_prefix = cfg.subject_tag.empty() ? "" : (cfg.subject_tag + " ");
+    send(cfg.host, cfg.service, cfg.from, cfg.recipients, subject_prefix + subject, message, is_html);
+}
 
 } // namespace mail
 

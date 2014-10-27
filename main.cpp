@@ -29,12 +29,15 @@
 #include "rapidxml/rapidxml.hpp"
 #include "rapidxml/rapidxml_print.hpp"
 
+#include "mail.hpp"
 
 struct options
 {
     options()
         : verbose(false)
         , track_changes(false)
+        , send_report(false)
+        , save_report(false)
         , log_format(xml)
         , connections(5)
         , retries(3)
@@ -54,6 +57,8 @@ struct options
     bool verbose;
     
     bool track_changes;
+    bool send_report;
+    bool save_report;
     enum { binary, xml } log_format;
 
     unsigned short connections;
@@ -86,6 +91,8 @@ bool process_options(int argc, char **argv, options & op)
         ("branch", po::value<std::string>()->default_value(op.branch), "branch name {develop, master}")
         ("track-changes", "compare failures with the previous run")
         ("log-format", po::value<std::string>()->default_value("xml"), "the format of failures log {xml, binary}")
+        ("send-report", "send an email containing the report about the failures")
+        ("save-report", "save report to file")
         ("verbose", "show details")
         ;
 
@@ -111,6 +118,12 @@ bool process_options(int argc, char **argv, options & op)
     if ( vm.count("track-changes") )
         op.track_changes = true;
 
+    if ( vm.count("send-report") )
+        op.send_report = true;
+
+    if ( vm.count("save-report") )
+        op.save_report = true;
+    
     std::string lf = vm["log-format"].as<std::string>();
     if ( lf != "xml" && lf != "binary" )
     {
@@ -627,27 +640,27 @@ struct fail_info
     fail_info(std::string const& runner_,
               std::string const& toolset_,
               std::string const& test_name_,
-              std::string const& reason_)
+              std::string const& reason_,
+              std::string const& url_)
         : runner(runner_)
         , toolset(toolset_)
         , test_name(test_name_)
         , reason(reason_)
+        , url(url_)
     {}
 
     bool operator<(fail_info const& r) const
     {
-        //return runner < r.runner
-        //        || runner == r.runner && ( toolset < r.toolset
-        //            || toolset == r.toolset && test_name < r.test_name );
         return test_name < r.test_name
-                || test_name == r.test_name && ( toolset < r.toolset
-                    || toolset == r.toolset && runner < r.runner );
+                || test_name == r.test_name && ( runner < r.runner
+                    || runner == r.runner && toolset < r.toolset );
     }
 
     std::string runner;
     std::string toolset;
     std::string test_name;
     std::string reason;
+    std::string url;
 
 private:
     template<class Archive>
@@ -716,7 +729,7 @@ void process_document(std::string const& library_name,
             std::string reason;
             process_fail(doc, *(log_it->fail_it), log_it->log, reason, op);
 
-            if ( op.track_changes )
+            if ( op.track_changes || op.save_report || op.send_report )
             {
                 // log only "important" errors
                 if ( is_reason_important(reason) )
@@ -725,7 +738,8 @@ void process_document(std::string const& library_name,
                         nodes.runners[log_it->fail_it->toolset_index],
                         nodes.toolsets[log_it->fail_it->toolset_index],
                         log_it->fail_it->test_name,
-                        reason));
+                        reason,
+                        log_it->fail_it->log_url));
                 }
             }
         }
@@ -759,11 +773,31 @@ private:
     friend class boost::serialization::access;
 };
 
-typedef std::pair
-        <
-            std::vector<library_fail_info>::const_iterator,
-            std::set<fail_info>::const_iterator
-        > compared_fail_info;
+struct compared_fail_info
+{
+    compared_fail_info() {}
+
+    compared_fail_info(std::vector<library_fail_info>::const_iterator const& library_it_,
+                       std::set<fail_info>::const_iterator const& fail_it_,
+                       std::set<fail_info>::const_iterator const& previous_fail_it_)
+        : library_it(library_it_)
+        , fail_it(fail_it_)
+        , previous_fail_it(previous_fail_it_)
+        , is_previous_valid(true)
+    {}
+
+    compared_fail_info(std::vector<library_fail_info>::const_iterator const& library_it_,
+                       std::set<fail_info>::const_iterator const& fail_it_)
+        : library_it(library_it_)
+        , fail_it(fail_it_)
+        , is_previous_valid(false)
+    {}
+
+    std::vector<library_fail_info>::const_iterator library_it;
+    std::set<fail_info>::const_iterator fail_it;
+    std::set<fail_info>::const_iterator previous_fail_it;
+    bool is_previous_valid;
+};
 
 struct is_same_library
 {
@@ -810,7 +844,7 @@ void compare_failures_logs(std::vector<library_fail_info> const& previous_failur
                 {
                     // important reason
                     if ( is_reason_important(fail_it->reason) )
-                        new_errors.push_back(compared_fail_info(lib_it, fail_it));
+                        new_errors.push_back(compared_fail_info(lib_it, fail_it, prev_fail_it));
                 }
                 // the failure found
                 else
@@ -819,12 +853,114 @@ void compare_failures_logs(std::vector<library_fail_info> const& previous_failur
                     if ( is_reason_important(fail_it->reason)
                       && fail_it->reason != prev_fail_it->reason )
                     {
-                        changed_errors.push_back(compared_fail_info(lib_it, fail_it));
+                        changed_errors.push_back(compared_fail_info(lib_it, fail_it, prev_fail_it));
                     }
                 }
             }
         }
     }
+}
+
+std::string reason_to_style(std::string const& reason)
+{
+    if ( reason == "run" )
+        return "background-color: #ffff00;";
+    else if ( reason == "comp")
+        return "background-color: #ffbb00;";
+    else if ( reason == "link" )
+        return "background-color: #ffdd00;";
+    else if ( reason == "unkn" )    
+        return "background-color: #ffff88;";
+    else
+        return "";
+}
+
+void output_errors(std::vector<compared_fail_info> const& errors,
+                   std::ostream & os)
+{
+    typedef std::vector<compared_fail_info>::const_iterator iterator;
+
+    std::string prev_library;
+    std::string prev_test;
+    for ( iterator it = errors.begin() ; it != errors.end() ; ++it )
+    {
+        if ( it->library_it->library != prev_library )
+        {
+            os << "<h3>" << it->library_it->library << "</h3>";
+        }
+
+        if ( it->fail_it->test_name != prev_test )
+        {
+            if ( ! prev_test.empty() )
+            {
+                os << "</table>";
+                os << "</div>";
+                os << "</div>";
+            }
+            os << "<div style=\"margin:10px;\">";
+            os << "<span style=\"font-weight: bold;\">" << it->fail_it->test_name << "</span>";
+            os << "<div style=\"margin:5px;\">";
+            os << "<table style=\"border-width: 0px;\">";
+        }
+
+        os << "<tr><td>";
+        if ( it->is_previous_valid )
+        {
+            os << "<span style=\"" << reason_to_style(it->previous_fail_it->reason) << "\">"
+               << it->previous_fail_it->reason << "</span>";
+            os << "->";
+        }        
+        os << "<span style=\"" << reason_to_style(it->fail_it->reason) << "\">" << it->fail_it->reason << "</span>";
+
+        os << "</td><td>";
+        os << "<a href=\"" << it->fail_it->url << "\">" << it->fail_it->toolset << " (" << it->fail_it->runner << ")</a>";
+        os << "</td></tr>";
+
+        prev_library = it->library_it->library;
+        prev_test = it->fail_it->test_name;
+    }
+
+    if ( ! prev_test.empty() )
+    {
+        os << "</table>";
+        os << "</div>";
+        os << "</div>";
+    }
+}
+
+void output_report(std::vector<compared_fail_info> const& new_errors,
+                   std::vector<compared_fail_info> const& changed_errors,
+                   std::ostream & os)
+{
+    // NOTE: errors should be sorted in the following order:
+    // library -> test -> runner -> toolset
+
+    os << "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Transitional//EN\""
+       << " \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd\">"
+       << "<html xmlns=\"http://www.w3.org/1999/xhtml\">"
+       << "<head><title></title>"
+       << "<meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\"/>"
+       << "</head><body>";
+
+    os << "<div style=\"margin:10px;\">"
+       << "Detected " << new_errors.size() << " new failures."
+       << "<br/>"
+       << "Detected " << changed_errors.size() << " changed failures."
+       << "</div>";
+
+    if ( ! new_errors.empty() )
+    {
+        os << "<h2>New errors:</h2>";
+        output_errors(new_errors, os);
+    }
+
+    if ( ! changed_errors.empty() )
+    {
+        os << "<h2>Changed errors:</h2>";
+        output_errors(changed_errors, os);
+    }
+
+    os << "</body></html>";
 }
 
 int main(int argc, char **argv)
@@ -889,45 +1025,6 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    // load old failures
-    std::vector<library_fail_info> old_failures;
-    bool old_failures_opened = false;
-    if ( op.track_changes )
-    {
-        try
-        {
-            if ( op.log_format == options::xml )
-            {
-                std::ifstream ifs("failures.xml");
-                if ( ifs.is_open() )
-                {
-                    boost::archive::xml_iarchive ia(ifs);
-                    ia >> boost::serialization::make_nvp("libraries", old_failures);
-                    old_failures_opened = true;
-                }
-            }
-            else // binary
-            {
-                std::ifstream ifs("failures.bin", std::ios::binary);
-                if ( ifs.is_open() )
-                {
-                    boost::archive::binary_iarchive ia(ifs);
-                    ia >> boost::serialization::make_nvp("libraries", old_failures);
-                    old_failures_opened = true;
-                }
-            }
-
-            if ( old_failures_opened )
-                std::cout << "Failures log found." << std::endl;
-            else
-                std::cout << "Failures log not found." << std::endl;
-        }
-        catch (std::exception & e)
-        {
-            std::cerr << "Error loading failures log: " << e.what() << std::endl;
-        }
-    }
-
     // prepare container for new failures
     std::vector<library_fail_info> failures(op.libraries.size());
 
@@ -971,38 +1068,109 @@ int main(int argc, char **argv)
         }
     }
 
-    // changes tracking enabled
+    std::string failures_log_path = op.log_format == options::xml ? "failures.xml" : "failures.bin";
+
+    // load old failures
+    std::vector<library_fail_info> old_failures;
+    bool old_failures_opened = false;
     if ( op.track_changes )
+    {
+        try
+        {
+            std::ifstream ifs(failures_log_path.c_str(), std::ios::binary);
+            if ( ifs.is_open() )
+            {
+                boost::archive::binary_iarchive ia(ifs);
+                ia >> boost::serialization::make_nvp("libraries", old_failures);
+                old_failures_opened = true;
+            }
+
+            if ( old_failures_opened )
+                std::cout << "Failures log found." << std::endl;
+            else
+                std::cout << "Failures log not found." << std::endl;
+        }
+        catch (std::exception & e)
+        {
+            std::cerr << "Error loading failures log: " << e.what() << std::endl;
+
+            // The log may be corrupted, try to remove it
+            boost::system::error_code ec;
+            boost::filesystem::remove(failures_log_path, ec); // ignore error
+        }
+    }
+
+    // NOTE: In case if reports should be emailed
+    // new log should be saved only if the email was sent properly
+    bool is_safe_to_save_log = true;
+
+    // reporting enabled
+    // NOTE: if tracking is disabled all errors will be treated as new
+    if ( op.send_report || op.save_report )
     {
         std::vector<compared_fail_info> new_errors;
         std::vector<compared_fail_info> changed_errors;
         compare_failures_logs(old_failures, failures, new_errors, changed_errors);
 
-        std::cout << "Detected " << new_errors.size() << " new failures." << std::endl;
-        std::cout << "Detected " << changed_errors.size() << " changed failures." << std::endl;
+        std::stringstream report_stream;
+        output_report(new_errors, changed_errors, report_stream);
 
+        if ( op.save_report )
+        {
+            std::ofstream ofs("report.html", std::ios::trunc);
+            ofs << report_stream.str();
+        }
+
+        if ( op.send_report && ( !op.track_changes || !new_errors.empty() || !changed_errors.empty() ) )
+        {
+            mail::config cfg;
+            if ( ! cfg.load("mail.cfg") )
+            {
+                std::cerr << "Unable to load mailing info." << std::endl;
+                is_safe_to_save_log = false;
+            }
+            else
+            {
+                std::cout << "Sending report." << std::endl;
+
+                try
+                {
+                    std::string subject = "Regression report";
+                    if ( op.track_changes )
+                    {
+                        if ( !new_errors.empty() && !changed_errors.empty() )
+                            subject = "New and changed errors detected!";
+                        else if ( !new_errors.empty() )
+                            subject = "New errors detected!";
+                        else if ( !changed_errors.empty() )
+                            subject = "Changed errors detected!";
+                        else
+                            subject = "Errors detected!";
+                    }
+
+                    mail::send(cfg, subject, report_stream.str(), true);
+                }
+                catch (std::exception & e)
+                {
+                    std::cerr << "Error sending report: " << e.what() << std::endl;
+                    is_safe_to_save_log = false;
+                }
+            }
+        }
+    }
+
+    if ( op.track_changes && is_safe_to_save_log )
+    {
         std::cout << "Saving failures log." << std::endl;
 
         try
         {
-            if ( op.log_format == options::xml )
-            {
-                std::ofstream ofs("failures.xml", std::ios::trunc);
-                if ( !ofs.is_open() )
-                    throw std::runtime_error("unable to open file");
-            
-                boost::archive::xml_oarchive oa(ofs);
-                oa << boost::serialization::make_nvp("libraries", failures);
-            }
-            else // binary
-            {
-                std::ofstream ofs("failures.bin", std::ios::trunc | std::ios::binary);
-                if ( !ofs.is_open() )
-                    throw std::runtime_error("unable to open file");
+            std::ofstream ofs(failures_log_path.c_str(), std::ios::trunc | std::ios::binary);
+            if ( !ofs.is_open() )
+                throw std::runtime_error("unable to open file");
 
-                boost::archive::xml_oarchive oa(ofs);
-                oa << boost::serialization::make_nvp("libraries", failures);
-            }
+            boost::archive::xml_oarchive oa(ofs);
+            oa << boost::serialization::make_nvp("libraries", failures);
         }
         catch (std::exception & e)
         {

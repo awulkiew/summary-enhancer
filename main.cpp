@@ -9,12 +9,20 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <set>
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/regex.hpp>
 #include <boost/algorithm/string/trim.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/program_options.hpp>
+
+#include <boost/archive/xml_iarchive.hpp>
+#include <boost/archive/xml_oarchive.hpp>
+#include <boost/archive/binary_iarchive.hpp>
+#include <boost/archive/binary_oarchive.hpp>
+#include <boost/serialization/set.hpp>
+#include <boost/serialization/vector.hpp>
 
 #include <boost/network.hpp>
 
@@ -26,6 +34,8 @@ struct options
 {
     options()
         : verbose(false)
+        , track_changes(false)
+        , log_format(xml)
         , connections(5)
         , retries(3)
         , tests_url("http://www.boost.org/development/tests/")
@@ -42,6 +52,10 @@ struct options
     }
 
     bool verbose;
+    
+    bool track_changes;
+    enum { binary, xml } log_format;
+
     unsigned short connections;
     unsigned short retries;
 
@@ -70,6 +84,8 @@ bool process_options(int argc, char **argv, options & op)
         ("connections", po::value<int>()->default_value(op.connections), "max number of connections [1..100]")
         ("retries", po::value<int>()->default_value(op.retries), "max number of retries [1..10]")
         ("branch", po::value<std::string>()->default_value(op.branch), "branch name {develop, master}")
+        ("track-changes", "compare failures with the previous run")
+        ("log-format", po::value<std::string>()->default_value("xml"), "the format of failures log {xml, binary}")
         ("verbose", "show details")
         ;
 
@@ -91,6 +107,17 @@ bool process_options(int argc, char **argv, options & op)
 
     if ( vm.count("verbose") )
         op.verbose = true;
+
+    if ( vm.count("track-changes") )
+        op.track_changes = true;
+
+    std::string lf = vm["log-format"].as<std::string>();
+    if ( lf != "xml" && lf != "binary" )
+    {
+        std::cerr << "Invalid log format" << std::endl;
+        result = false;
+    }
+    op.log_format = lf == "binary" ? options::binary : options::xml;
 
     int c = vm["connections"].as<int>();
     if ( c < 1 || 100 < c )
@@ -178,15 +205,19 @@ struct fail_node
     fail_node(rapidxml::xml_node<> * td_,
               rapidxml::xml_node<> * a_,
               rapidxml::xml_attribute<> * href_,
-              std::string const& log_url_/*,
-              std::size_t index_*/)
-        : td(td_), a(a_), href(href_), log_url(log_url_)//, index(index_)
+              std::string const& log_url_,
+              std::size_t toolset_index_,
+              std::string const& test_name_)
+        : td(td_), a(a_), href(href_), log_url(log_url_)
+        , toolset_index(toolset_index_)
+        , test_name(test_name_)
     {}
     rapidxml::xml_node<> * td;
     rapidxml::xml_node<> * a;
     rapidxml::xml_attribute<> * href;
     std::string log_url;
-    std::size_t index;
+    std::size_t toolset_index;
+    std::string test_name;
 };
 
 struct anchor_node
@@ -229,10 +260,8 @@ struct nodes_containers
 
     nodes_containers(rapidxml::xml_document<> & doc, options const& op)
     {
-        std::string current_test_name;
-        std::size_t current_toolset_index = 0;
-
-        gather_nodes(doc.first_node(), op, current_test_name, current_toolset_index);
+        gathering_state state;
+        gather_nodes(doc.first_node(), op, state);
     }
 
     fails_container fails;
@@ -242,41 +271,62 @@ struct nodes_containers
     strings_container toolsets;
 
 private:
+    struct gathering_state
+    {
+        gathering_state()
+            : toolset_index(0)
+            , table_footer_counter(0)
+        {}
+
+        std::size_t toolset_index;
+        std::string test_name;
+        int table_footer_counter;
+    };
+
     void gather_nodes(rapidxml::xml_node<> * n, options const& op,
-                      std::string & current_test_name,
-                      std::size_t & current_toolset_index)
+                      gathering_state & state)
     {
         if ( n == NULL )
             return;
 
+        std::string tag = name(n);
+
         // "fail" <td>
-        if ( "td" == name(n) )
+        if ( "td" == tag )
         {
             std::string class_name = value(n->first_attribute("class"));
 
             if ( "runner" == class_name )
             {
-                // runner <a>
-                rapidxml::xml_node<> * a = n->first_node("a");
-                if ( a )
+                // ignore footer
+                if ( state.table_footer_counter == 0 )
                 {
-                    // colspan attribute
-                    int colspan = value_as<int>(n->first_attribute("colspan"), 1);
-                    if ( colspan < 1 )
-                        colspan = 1;
+                    // runner <a>
+                    rapidxml::xml_node<> * a = n->first_node("a");
+                    if ( a )
+                    {
+                        // colspan attribute
+                        int colspan = value_as<int>(n->first_attribute("colspan"), 1);
+                        if ( colspan < 1 )
+                            colspan = 1;
 
-                    std::string runner = value(a);
-                    boost::trim(runner);
-                    runners.insert(runners.end(), colspan, runner);
+                        std::string runner = value(a);
+                        boost::trim(runner);
+                        runners.insert(runners.end(), colspan, runner);
+                    }
                 }
             }
             else if ( "toolset-name" == class_name
                    || "required-toolset-name" == class_name )
             {
-                // toolset <span>
-                std::string name = value(n->first_node("span"));
-                boost::trim(name);
-                toolsets.push_back(name);
+                // ignore footer
+                if ( state.table_footer_counter == 0 )
+                {
+                    // toolset <span>
+                    std::string name = value(n->first_node("span"));
+                    boost::trim(name);
+                    toolsets.push_back(name);
+                }
             }
             else if ( "test-name" == class_name )
             {
@@ -285,12 +335,12 @@ private:
 
                 std::string test_name = value(n->first_node("a"));
                 boost::trim(test_name);
-                current_test_name = test_name;
-                current_toolset_index = 0;
+                state.test_name = test_name;
+                state.toolset_index = 0;
             }
             else if ( "library-fail-unexpected-new" == class_name )
             {
-                if ( current_toolset_index >= toolsets.size() )
+                if ( state.toolset_index >= toolsets.size() )
                     throw std::runtime_error("unexpected toolsets/tests number");
 
                 // "fail" <a>
@@ -302,22 +352,22 @@ private:
                     {
                         // "fail link"
                         std::string global_href = to_global(value(href_attr), op.branch_url);
-                        fails.push_back(fail_node(n, anch, href_attr, global_href));
+                        fails.push_back(fail_node(n, anch, href_attr, global_href, state.toolset_index, state.test_name));
                     }
                 }
 
-                ++current_toolset_index;
+                ++state.toolset_index;
             }
             else if ( boost::starts_with(class_name, "library-") )
             {
-                if ( current_toolset_index >= toolsets.size() )
+                if ( state.toolset_index >= toolsets.size() )
                     throw std::runtime_error("unexpected toolsets/tests number");
 
-                ++current_toolset_index;
+                ++state.toolset_index;
             }
         }
         // non-fail/log <a>
-        else if ( "a" == name(n) )
+        else if ( "a" == tag )
         {
             rapidxml::xml_attribute<> * class_attr = n->first_attribute("class");
             rapidxml::xml_attribute<> * href_attr = n->first_attribute("href");
@@ -327,10 +377,21 @@ private:
                 non_log_anchors.push_back(anchor_node(n, href_attr, global_href));
             }
         }
-
-        // depth first
-        gather_nodes(n->first_node(), op, current_test_name, current_toolset_index);
-        gather_nodes(n->next_sibling(), op, current_test_name, current_toolset_index);
+        
+        if ( "tfoot" == tag )
+        {
+            // depth first
+            ++state.table_footer_counter;
+            gather_nodes(n->first_node(), op, state);
+            --state.table_footer_counter;
+        }
+        else
+        {
+            // depth first
+            gather_nodes(n->first_node(), op, state);
+        }
+        
+        gather_nodes(n->next_sibling(), op, state);
     }
 };
 
@@ -444,6 +505,7 @@ std::string filename_from_url(std::string const& url)
 void modify_nodes(rapidxml::xml_document<> & doc,
                   fail_node & n,
                   std::string const& log,
+                  std::string & reason,
                   options const& op)
 {
     if ( op.verbose )
@@ -455,6 +517,7 @@ void modify_nodes(rapidxml::xml_document<> & doc,
         rapidxml::xml_attribute<> * style_attr = doc.allocate_attribute("style", "background-color: #88ff00;");
         n.td->append_attribute(style_attr);
 
+        reason = "time";
         set_value(doc, n.a, "time");
     }
     // File too big or /bigobj
@@ -467,6 +530,7 @@ void modify_nodes(rapidxml::xml_document<> & doc,
         rapidxml::xml_attribute<> * style_attr = doc.allocate_attribute("style", "background-color: #00ff88;");
         n.td->append_attribute(style_attr);
 
+        reason = "file";
         set_value(doc, n.a, "file");
     }
     // internal compiler error
@@ -479,6 +543,7 @@ void modify_nodes(rapidxml::xml_document<> & doc,
         rapidxml::xml_attribute<> * style_attr = doc.allocate_attribute("style", "background-color: #ff88ff;");
         n.td->append_attribute(style_attr);
 
+        reason = "ierr";
         set_value(doc, n.a, "ierr");
     }
     // compilation failed
@@ -491,6 +556,7 @@ void modify_nodes(rapidxml::xml_document<> & doc,
         rapidxml::xml_attribute<> * style_attr = doc.allocate_attribute("style", "background-color: #ffbb00;");
         n.td->append_attribute(style_attr);
 
+        reason = "comp";
         set_value(doc, n.a, "comp");
     }
     // linking failed
@@ -503,6 +569,7 @@ void modify_nodes(rapidxml::xml_document<> & doc,
         rapidxml::xml_attribute<> * style_attr = doc.allocate_attribute("style", "background-color: #ffdd00;");
         n.td->append_attribute(style_attr);
 
+        reason = "link";
         set_value(doc, n.a, "link");
     }
     // run failed
@@ -515,6 +582,7 @@ void modify_nodes(rapidxml::xml_document<> & doc,
         rapidxml::xml_attribute<> * style_attr = doc.allocate_attribute("style", "background-color: #ffff00;");
         n.td->append_attribute(style_attr);
 
+        reason = "run";
         set_value(doc, n.a, "run");
     }
     // unknown fail
@@ -523,11 +591,16 @@ void modify_nodes(rapidxml::xml_document<> & doc,
         rapidxml::xml_attribute<> * style_attr = doc.allocate_attribute("style", "background-color: #ffff88;");
         n.td->append_attribute(style_attr);
 
+        reason = "unkn";
         set_value(doc, n.a, "unkn");
     }
 }
 
-void process_fail(rapidxml::xml_document<> & doc, fail_node & n, std::string const& log, options const& op)
+void process_fail(rapidxml::xml_document<> & doc,
+                  fail_node & n,
+                  std::string const& log,
+                  std::string & reason,
+                  options const& op)
 {
     // remove spaces
     while ( n.td->first_node("") )
@@ -538,7 +611,7 @@ void process_fail(rapidxml::xml_document<> & doc, fail_node & n, std::string con
     // set new, global href
     n.href->value( doc.allocate_string(n.log_url.c_str()) );
 
-    modify_nodes(doc, n, log, op);
+    modify_nodes(doc, n, log, reason, op);
 }
 
 void process_anchor(rapidxml::xml_document<> & doc, anchor_node & n)
@@ -547,7 +620,50 @@ void process_anchor(rapidxml::xml_document<> & doc, anchor_node & n)
     n.href->value( doc.allocate_string(n.url.c_str()) );
 }
 
-void process_document(std::string const& name, std::string & in, std::string & out, options const& op)
+struct fail_info
+{
+    fail_info() {}
+
+    fail_info(std::string const& runner_,
+              std::string const& toolset_,
+              std::string const& test_name_,
+              std::string const& reason_)
+        : runner(runner_)
+        , toolset(toolset_)
+        , test_name(test_name_)
+        , reason(reason_)
+    {}
+
+    bool operator<(fail_info const& r) const
+    {
+        return runner < r.runner
+                || ( runner == r.runner && toolset < r.toolset
+                    || ( toolset == r.toolset && test_name < r.test_name ) );
+    }
+
+    std::string runner;
+    std::string toolset;
+    std::string test_name;
+    std::string reason;
+
+private:
+    template<class Archive>
+    void serialize(Archive & ar, const unsigned int version)
+    {
+        ar & boost::serialization::make_nvp("runner", runner);
+        ar & boost::serialization::make_nvp("toolset", toolset);
+        ar & boost::serialization::make_nvp("test", test_name);
+        ar & boost::serialization::make_nvp("reason", reason);
+    }
+
+    friend class boost::serialization::access;
+};
+
+void process_document(std::string const& library_name,
+                      std::string & in,
+                      std::string & out,
+                      std::set<fail_info> & failures,
+                      options const& op)
 {
     out.clear();
     if ( in.empty() )
@@ -589,7 +705,17 @@ void process_document(std::string const& name, std::string & in, std::string & o
         for ( std::vector<logs_pool::log_info>::iterator log_it = logs.begin() ;
               log_it != logs.end() ; ++log_it )
         {
-            process_fail(doc, *(log_it->fail_it), log_it->log, op);
+            std::string reason;
+            process_fail(doc, *(log_it->fail_it), log_it->log, reason, op);
+
+            if ( op.track_changes )
+            {
+                failures.insert(fail_info(
+                    nodes.runners[log_it->fail_it->toolset_index],
+                    nodes.toolsets[log_it->fail_it->toolset_index],
+                    log_it->fail_it->test_name,
+                    reason));
+            }
         }
     }
 
@@ -600,10 +726,26 @@ void process_document(std::string const& name, std::string & in, std::string & o
         process_anchor(doc, *a_it);
     }
 
-    std::cout << "Saving: " << name << std::endl;
+    std::cout << "Saving: " << library_name << std::endl;
 
     rapidxml::print(std::back_inserter(out), doc);
 }
+
+struct library_fail_info
+{
+    std::string library;
+    std::set<fail_info> failures;
+
+private:
+    template<class Archive>
+    void serialize(Archive & ar, const unsigned int version)
+    {
+        ar & boost::serialization::make_nvp("library", library);
+        ar & boost::serialization::make_nvp("failures", failures);
+    }
+
+    friend class boost::serialization::access;
+};
 
 int main(int argc, char **argv)
 {
@@ -667,6 +809,48 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    // load old failures
+    std::vector<library_fail_info> old_failures;
+    bool old_failures_opened = false;
+    if ( op.track_changes )
+    {
+        try
+        {
+            if ( op.log_format == options::xml )
+            {
+                std::ifstream ifs("failures.xml");
+                if ( ifs.is_open() )
+                {
+                    old_failures_opened = true;
+                    boost::archive::xml_iarchive ia(ifs);
+                    ia >> boost::serialization::make_nvp("libraries", old_failures);
+                }
+            }
+            else // binary
+            {
+                std::ifstream ifs("failures.bin", std::ios::binary);
+                if ( ifs.is_open() )
+                {
+                    old_failures_opened = true;
+                    boost::archive::binary_iarchive ia(ifs);
+                    ia >> boost::serialization::make_nvp("libraries", old_failures);
+                }
+            }
+
+            if ( ! old_failures_opened )
+            {
+                std::cout << "Failures log not found." << std::endl;
+            }            
+        }
+        catch (std::exception & e)
+        {
+            std::cerr << "Error loading failures log: " << e.what() << std::endl;
+        }
+    }
+
+    // prepare container for new failures
+    std::vector<library_fail_info> failures(op.libraries.size());
+
     // process all libraries
     for ( std::vector<std::string>::iterator it = op.libraries.begin() ;
           it != op.libraries.end() ; ++it )
@@ -685,8 +869,12 @@ int main(int argc, char **argv)
 
             // process the summary page
             std::string processed_body;
+            process_document(lib, body, processed_body,
+                             failures[std::distance(op.libraries.begin(), it)].failures,
+                             op);
 
-            process_document(lib, body, processed_body, op);
+            // set library name
+            failures[std::distance(op.libraries.begin(), it)].library = lib;
 
             // save processed summary page
             std::string of_name = std::string("result/") + op.branch + '-' + lib + ".html";
@@ -697,6 +885,41 @@ int main(int argc, char **argv)
         catch (std::exception & e)
         {
             std::cerr << "Error: " << e.what() << std::endl;
+
+            failures[std::distance(op.libraries.begin(), it)].library.clear();
+            failures[std::distance(op.libraries.begin(), it)].failures.clear();
+        }
+    }
+
+    // save log
+    if ( op.track_changes )
+    {
+        std::cout << "Saving failures log." << std::endl;
+
+        try
+        {
+            if ( op.log_format == options::xml )
+            {
+                std::ofstream ofs("failures.xml", std::ios::trunc);
+                if ( !ofs.is_open() )
+                    throw std::runtime_error("unable to open file");
+            
+                boost::archive::xml_oarchive oa(ofs);
+                oa << boost::serialization::make_nvp("libraries", failures);
+            }
+            else // binary
+            {
+                std::ofstream ofs("failures.bin", std::ios::trunc | std::ios::binary);
+                if ( !ofs.is_open() )
+                    throw std::runtime_error("unable to open file");
+
+                boost::archive::xml_oarchive oa(ofs);
+                oa << boost::serialization::make_nvp("libraries", failures);
+            }
+        }
+        catch (std::exception & e)
+        {
+            std::cerr << "Error saving failures log: " << e.what() << std::endl;
         }
     }
 

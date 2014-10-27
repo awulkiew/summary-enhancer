@@ -12,6 +12,7 @@
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/regex.hpp>
+#include <boost/algorithm/string/trim.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/program_options.hpp>
 
@@ -179,6 +180,16 @@ std::string value(NorA * n)
         return std::string();
 }
 
+template <typename T, typename NorA>
+T value_as(NorA * n, T def)
+{
+    T res = def;
+    try {
+        res = boost::lexical_cast<T>(value(n));
+    } catch (...) {}
+    return res;
+}
+
 template <typename NorA>
 void set_value(rapidxml::xml_document<> & doc, NorA * n, const char* v)
 {
@@ -194,13 +205,15 @@ struct fail_node
     fail_node(rapidxml::xml_node<> * td_,
               rapidxml::xml_node<> * a_,
               rapidxml::xml_attribute<> * href_,
-              std::string const& log_url_)
-        : td(td_), a(a_), href(href_), log_url(log_url_)
+              std::string const& log_url_/*,
+              std::size_t index_*/)
+        : td(td_), a(a_), href(href_), log_url(log_url_)//, index(index_)
     {}
     rapidxml::xml_node<> * td;
     rapidxml::xml_node<> * a;
     rapidxml::xml_attribute<> * href;
     std::string log_url;
+    std::size_t index;
 };
 
 struct anchor_node
@@ -238,13 +251,25 @@ struct nodes_containers
     typedef std::vector<anchor_node> anchors_container;
     typedef anchors_container::iterator anchors_iterator;
 
+    typedef std::vector<std::string> strings_container;
+    typedef strings_container::iterator strings_iterator;
+
     nodes_containers(rapidxml::xml_document<> & doc, options const& op)
     {
         gather_nodes(doc.first_node(), op);
+
+        if ( runners.size() != toolsets.size() )
+        {
+            runners.clear();
+            toolsets.clear();
+        }
     }
 
     fails_container fails;
     anchors_container non_log_anchors;
+
+    strings_container runners;
+    strings_container toolsets;
 
 private:
     void gather_nodes(rapidxml::xml_node<> * n, options const& op)
@@ -255,9 +280,9 @@ private:
         // "fail" <td>
         if ( "td" == name(n) )
         {
-            rapidxml::xml_attribute<> * attr = n->first_attribute("class");
+            std::string class_name = value(n->first_attribute("class"));
 
-            if ( attr && "library-fail-unexpected-new" == value(attr) )
+            if ( "library-fail-unexpected-new" == class_name )
             {
                 // "fail" <a>
                 rapidxml::xml_node<> * anch = n->first_node("a");
@@ -272,10 +297,33 @@ private:
                     }
                 }
             }
-        }
+            else if ( "runner" == class_name )
+            {
+                // runner <a>
+                rapidxml::xml_node<> * a = n->first_node("a");
+                if ( a )
+                {
+                    // colspan attribute
+                    int colspan = value_as<int>(n->first_attribute("colspan"), 1);
+                    if ( colspan < 1 )
+                        colspan = 1;
 
+                    std::string runner = value(a);
+                    boost::trim(runner);
+                    runners.insert(runners.end(), colspan, runner);
+                }
+            }
+            else if ( "toolset-name" == class_name
+                   || "required-toolset-name" == class_name )
+            {
+                // toolset <span>
+                std::string name = value(n->first_node("span"));
+                boost::trim(name);
+                toolsets.push_back(name);
+            }
+        }
         // non-fail/log <a>
-        if ( "a" == name(n) )
+        else if ( "a" == name(n) )
         {
             rapidxml::xml_attribute<> * class_attr = n->first_attribute("class");
             rapidxml::xml_attribute<> * href_attr = n->first_attribute("href");

@@ -57,109 +57,82 @@ struct options
 
 bool process_options(int argc, char **argv, options & op)
 {
-    try
+    std::stringstream msg;
+    msg << "Usage: summary-enhancer [OPTIONS] library...\n\n";
+    msg << "Pass space separated list of libraries. In sublibs names use hyphen (-) instead of slash (/), e.g. geometry-index\n\n";
+    msg << "Example: summary-enhancer geometry geometry-index geometry-extensions\n\n";
+    msg << "Options";
+
+    namespace po = boost::program_options;
+    po::options_description desc(msg.str());
+    desc.add_options()
+        ("help", "produce help message")
+        ("connections", po::value<int>()->default_value(op.connections), "max number of connections [1..100]")
+        ("retries", po::value<int>()->default_value(op.retries), "max number of retries [1..10]")
+        ("branch", po::value<std::string>()->default_value(op.branch), "branch name {develop, master}")
+        ("verbose", "show details")
+        ;
+
+    po::parsed_options parsed =
+        po::command_line_parser(argc, argv).options(desc).allow_unregistered().run();
+    op.libraries = collect_unrecognized(parsed.options, po::include_positional);
+
+    po::variables_map vm;
+    po::store(parsed, vm);
+    po::notify(vm);
+
+    if ( argc <= 1 || vm.count("help") || op.libraries.empty() )
     {
-        std::stringstream msg;
-        msg << "Usage: summary-enhancer [OPTIONS] library...\n\n";
-        msg << "Pass space separated list of libraries. In sublibs names use hyphen (-) instead of slash (/), e.g. geometry-index\n\n";
-        msg << "Example: summary-enhancer geometry geometry-index geometry-extensions\n\n";
-        msg << "Options";
-
-        namespace po = boost::program_options;
-        po::options_description desc(msg.str());
-        desc.add_options()
-            ("help", "produce help message")
-            ("connections", po::value<int>()->default_value(op.connections), "max number of connections [1..100]")
-            ("retries", po::value<int>()->default_value(op.retries), "max number of retries [1..10]")
-            ("branch", po::value<std::string>()->default_value(op.branch), "branch name {develop, master}")
-            ("verbose", "show details")
-            ;
-
-        po::parsed_options parsed = 
-            po::command_line_parser(argc, argv).options(desc).allow_unregistered().run();
-        op.libraries = collect_unrecognized(parsed.options, po::include_positional);
-
-        po::variables_map vm;
-        po::store(parsed, vm);
-        po::notify(vm);    
-
-        if ( argc <= 1 || vm.count("help") || op.libraries.empty() )
-        {
-            std::cout << desc << "\n";
-            return false;
-        }
-
-        bool result = true;
-
-        if ( vm.count("verbose") )
-            op.verbose = true;
-
-        int c = vm["connections"].as<int>();
-        if ( c < 1 || 100 < c )
-        {
-            std::cerr << "Invalid connections value" << std::endl;
-            result = false;
-        }
-        op.connections = static_cast<unsigned short>(c);
-
-        int r = vm["retries"].as<int>();
-        if ( r < 1 || 10 < r )
-        {
-            std::cerr << "Invalid retries value" << std::endl;
-            result = false;
-        }
-        op.retries = static_cast<unsigned short>(r);
-
-        std::string b = vm["branch"].as<std::string>();
-        if ( b != "develop" && b != "master" )
-        {
-            std::cerr << "Invalid branch" << std::endl;
-            result = false;
-        }
-        op.branch = b;
-
-        op.refresh();
-
-        return result;
-    }
-    catch (std::exception & e)
-    {
-        std::cerr << "Error processing options: " << e.what() << std::endl;
+        std::cout << desc << "\n";
+        return false;
     }
 
-    return false;
+    bool result = true;
+
+    if ( vm.count("verbose") )
+        op.verbose = true;
+
+    int c = vm["connections"].as<int>();
+    if ( c < 1 || 100 < c )
+    {
+        std::cerr << "Invalid connections value" << std::endl;
+        result = false;
+    }
+    op.connections = static_cast<unsigned short>(c);
+
+    int r = vm["retries"].as<int>();
+    if ( r < 1 || 10 < r )
+    {
+        std::cerr << "Invalid retries value" << std::endl;
+        result = false;
+    }
+    op.retries = static_cast<unsigned short>(r);
+
+    std::string b = vm["branch"].as<std::string>();
+    if ( b != "develop" && b != "master" )
+    {
+        std::cerr << "Invalid branch" << std::endl;
+        result = false;
+    }
+    op.branch = b;
+
+    op.refresh();
+
+    return result;
 }
 
-std::string get_document(std::string const& url, std::string & error_msg)
+std::string get_document(std::string const& url)
 {
-    std::string body;
+    using namespace boost;
+    using namespace boost::network;
+    using namespace boost::network::http;
 
-    error_msg.clear();
-
-    try
-    {
-        using namespace boost;
-        using namespace boost::network;
-        using namespace boost::network::http;
-
-        http::client::request request_(url);
-        request_ << network::header("Host", "www.boost.org");
-        request_ << network::header("Connection", "keep-alive");
-        http::client client_;
-        http::client::response response_ = client_.get(request_);
-        body = http::body(response_);
-
-        if ( body.empty() )
-        {
-            error_msg = "Unknown error.";
-        }
-    }
-    catch (std::exception & e)
-    {
-        error_msg = e.what();
-    }
-
-    return body;
+    http::client::request request_(url);
+    request_ << network::header("Host", "www.boost.org");
+    request_ << network::header("Connection", "keep-alive");
+    http::client client_;
+    http::client::response response_ = client_.get(request_);
+    return http::body(response_);
 }
 
 template <typename NorA>
@@ -256,13 +229,10 @@ struct nodes_containers
 
     nodes_containers(rapidxml::xml_document<> & doc, options const& op)
     {
-        gather_nodes(doc.first_node(), op);
+        std::string current_test_name;
+        std::size_t current_toolset_index = 0;
 
-        if ( runners.size() != toolsets.size() )
-        {
-            runners.clear();
-            toolsets.clear();
-        }
+        gather_nodes(doc.first_node(), op, current_test_name, current_toolset_index);
     }
 
     fails_container fails;
@@ -272,7 +242,9 @@ struct nodes_containers
     strings_container toolsets;
 
 private:
-    void gather_nodes(rapidxml::xml_node<> * n, options const& op)
+    void gather_nodes(rapidxml::xml_node<> * n, options const& op,
+                      std::string & current_test_name,
+                      std::size_t & current_toolset_index)
     {
         if ( n == NULL )
             return;
@@ -282,22 +254,7 @@ private:
         {
             std::string class_name = value(n->first_attribute("class"));
 
-            if ( "library-fail-unexpected-new" == class_name )
-            {
-                // "fail" <a>
-                rapidxml::xml_node<> * anch = n->first_node("a");
-                if ( anch )
-                {
-                    rapidxml::xml_attribute<> * href_attr = anch->first_attribute("href");
-                    if ( href_attr )
-                    {
-                        // "fail link"
-                        std::string global_href = to_global(value(href_attr), op.branch_url);
-                        fails.push_back(fail_node(n, anch, href_attr, global_href));
-                    }
-                }
-            }
-            else if ( "runner" == class_name )
+            if ( "runner" == class_name )
             {
                 // runner <a>
                 rapidxml::xml_node<> * a = n->first_node("a");
@@ -321,6 +278,43 @@ private:
                 boost::trim(name);
                 toolsets.push_back(name);
             }
+            else if ( "test-name" == class_name )
+            {
+                if ( runners.size() != toolsets.size() )
+                    throw std::runtime_error("unexpected runners/toolsets number");
+
+                std::string test_name = value(n->first_node("a"));
+                boost::trim(test_name);
+                current_test_name = test_name;
+                current_toolset_index = 0;
+            }
+            else if ( "library-fail-unexpected-new" == class_name )
+            {
+                if ( current_toolset_index >= toolsets.size() )
+                    throw std::runtime_error("unexpected toolsets/tests number");
+
+                // "fail" <a>
+                rapidxml::xml_node<> * anch = n->first_node("a");
+                if ( anch )
+                {
+                    rapidxml::xml_attribute<> * href_attr = anch->first_attribute("href");
+                    if ( href_attr )
+                    {
+                        // "fail link"
+                        std::string global_href = to_global(value(href_attr), op.branch_url);
+                        fails.push_back(fail_node(n, anch, href_attr, global_href));
+                    }
+                }
+
+                ++current_toolset_index;
+            }
+            else if ( boost::starts_with(class_name, "library-") )
+            {
+                if ( current_toolset_index >= toolsets.size() )
+                    throw std::runtime_error("unexpected toolsets/tests number");
+
+                ++current_toolset_index;
+            }
         }
         // non-fail/log <a>
         else if ( "a" == name(n) )
@@ -335,8 +329,8 @@ private:
         }
 
         // depth first
-        gather_nodes(n->first_node(), op);
-        gather_nodes(n->next_sibling(), op);
+        gather_nodes(n->first_node(), op, current_test_name, current_toolset_index);
+        gather_nodes(n->next_sibling(), op, current_test_name, current_toolset_index);
     }
 };
 
@@ -419,7 +413,7 @@ struct logs_pool
                     }
                     else
                     {
-                        std::cerr << "ERROR! " << e.what() << std::endl;
+                        std::cerr << "Error: " << e.what() << std::endl;
                     }
                 }
 
@@ -613,10 +607,18 @@ void process_document(std::string const& name, std::string & in, std::string & o
 
 int main(int argc, char **argv)
 {
-    // process program options
     options op;
-    if ( !process_options(argc, argv, op) )
+    try
+    {
+        // process program options
+        if ( ! process_options(argc, argv, op) )
+            return 1;
+    }
+    catch (std::exception & e)
+    {
+        std::cerr << "Error parsing options: " << e.what() << std::endl;
         return 1;
+    }
 
     // prepare the environment
     try
@@ -627,17 +629,18 @@ int main(int argc, char **argv)
         {
             std::cout << "Downloading style." << std::endl;
 
-            std::string error_msg;
-            std::string body = get_document("http://www.boost.org/development/tests/develop/master.css", error_msg);
-            if ( !error_msg.empty() )
+            try
             {
-                std::cerr << "ERROR downloading style! " << std::endl;
-                std::cerr << error_msg << std::endl;
+                std::string body = get_document("http://www.boost.org/development/tests/develop/master.css");
+                std::ofstream of("master.css", std::ios::trunc);
+                of << body;
+            }
+            catch (std::exception & e)
+            {
+                std::cerr << "Error downloading style: " << e.what() << std::endl;
                 std::cerr << "You may try to download it manually from http://www.boost.org/development/tests/develop/master.css and place it in the working directory." << std::endl;
                 return 1;
             }
-            std::ofstream of("master.css", std::ios::trunc);
-            of << body;
         }
         else
         {
@@ -668,33 +671,33 @@ int main(int argc, char **argv)
     for ( std::vector<std::string>::iterator it = op.libraries.begin() ;
           it != op.libraries.end() ; ++it )
     {
-        std::string const& lib = *it;
-        std::string url = op.view_url + lib + "_.html";
-
-        std::cout << "Downloading: " << lib << std::endl;
-        
-        // download the summary page
-        std::string error_msg;
-        std::string body = get_document(url, error_msg);
-
-        if ( !error_msg.empty() )
+        try
         {
-            std::cerr << "ERROR! " << error_msg << std::endl;
-            continue;
+            std::string const& lib = *it;
+            std::string url = op.view_url + lib + "_.html";
+
+            std::cout << "Downloading: " << lib << std::endl;
+
+            // download the summary page
+            std::string body = get_document(url);
+
+            std::cout << "Processing." << std::endl;
+
+            // process the summary page
+            std::string processed_body;
+
+            process_document(lib, body, processed_body, op);
+
+            // save processed summary page
+            std::string of_name = std::string("result/") + op.branch + '-' + lib + ".html";
+            std::ofstream of(of_name.c_str(), std::ios::trunc);
+            of << processed_body;
+            of.close();
         }
-
-        std::cout << "Processing." << std::endl;
-
-        // process the summary page
-        std::string processed_body;
-
-        process_document(lib, body, processed_body, op);
-
-        // save processed summary page
-        std::string of_name = std::string("result/") + op.branch + '-' + lib + ".html";
-        std::ofstream of(of_name.c_str(), std::ios::trunc);
-        of << processed_body;
-        of.close();
+        catch (std::exception & e)
+        {
+            std::cerr << "Error: " << e.what() << std::endl;
+        }
     }
 
     return 0;

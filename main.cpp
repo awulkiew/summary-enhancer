@@ -886,6 +886,14 @@ void output_errors(std::vector<compared_fail_info> const& errors,
     {
         if ( it->library_it->library != prev_library )
         {
+            if ( ! prev_test.empty() )
+            {
+                os << "</table>";
+                os << "</div>";
+                os << "</div>";
+            }
+            prev_test.clear();
+
             os << "<h3>" << it->library_it->library << "</h3>";
         }
 

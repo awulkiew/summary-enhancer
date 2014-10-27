@@ -659,6 +659,11 @@ private:
     friend class boost::serialization::access;
 };
 
+bool is_reason_important(std::string const& reason)
+{
+    return reason == "comp" || reason == "link" || reason == "run" || reason == "unkn";
+}
+
 void process_document(std::string const& library_name,
                       std::string & in,
                       std::string & out,
@@ -710,11 +715,15 @@ void process_document(std::string const& library_name,
 
             if ( op.track_changes )
             {
-                failures.insert(fail_info(
-                    nodes.runners[log_it->fail_it->toolset_index],
-                    nodes.toolsets[log_it->fail_it->toolset_index],
-                    log_it->fail_it->test_name,
-                    reason));
+                // log only "important" errors
+                if ( is_reason_important(reason) )
+                {
+                    failures.insert(fail_info(
+                        nodes.runners[log_it->fail_it->toolset_index],
+                        nodes.toolsets[log_it->fail_it->toolset_index],
+                        log_it->fail_it->test_name,
+                        reason));
+                }
             }
         }
     }
@@ -746,6 +755,74 @@ private:
 
     friend class boost::serialization::access;
 };
+
+typedef std::pair
+        <
+            std::vector<library_fail_info>::const_iterator,
+            std::set<fail_info>::const_iterator
+        > compared_fail_info;
+
+struct is_same_library
+{
+    std::string library;
+    is_same_library(std::string const& library_) : library(library_) {}
+    bool operator()(library_fail_info const& l) const
+    {
+        return library == l.library;
+    }
+};
+
+void compare_failures_logs(std::vector<library_fail_info> const& previous_failures,
+                           std::vector<library_fail_info> const& current_failures,
+                           std::vector<compared_fail_info> & new_errors,
+                           std::vector<compared_fail_info> & changed_errors/*,
+                           std::vector<compared_fail_info> & no_longer_errors*/)
+{
+    for ( std::vector<library_fail_info>::const_iterator lib_it = current_failures.begin() ;
+          lib_it != current_failures.end() ; ++lib_it )
+    {
+        std::vector<library_fail_info>::const_iterator
+            prev_lib_it = std::find_if(previous_failures.begin(),
+                                       previous_failures.end(),
+                                       is_same_library(lib_it->library));
+
+        // previous log not found - treat failures as new
+        if ( prev_lib_it == previous_failures.end() )
+        {
+            for ( std::set<fail_info>::const_iterator fail_it = lib_it->failures.begin() ;
+                  fail_it != lib_it->failures.end() ; ++fail_it )
+            {
+                new_errors.push_back(compared_fail_info(lib_it, fail_it));
+            }
+        }
+        else
+        {
+            for ( std::set<fail_info>::const_iterator fail_it = lib_it->failures.begin() ;
+                  fail_it != lib_it->failures.end() ; ++fail_it )
+            {
+                std::set<fail_info>::const_iterator prev_fail_it = prev_lib_it->failures.find(*fail_it);
+
+                // if the failure wasn't found previously
+                if ( prev_fail_it == prev_lib_it->failures.end() )
+                {
+                    // important reason
+                    if ( is_reason_important(fail_it->reason) )
+                        new_errors.push_back(compared_fail_info(lib_it, fail_it));
+                }
+                // the failure found
+                else
+                {
+                    // important reason and different than previously
+                    if ( is_reason_important(fail_it->reason)
+                      && fail_it->reason != prev_fail_it->reason )
+                    {
+                        changed_errors.push_back(compared_fail_info(lib_it, fail_it));
+                    }
+                }
+            }
+        }
+    }
+}
 
 int main(int argc, char **argv)
 {
@@ -821,9 +898,9 @@ int main(int argc, char **argv)
                 std::ifstream ifs("failures.xml");
                 if ( ifs.is_open() )
                 {
-                    old_failures_opened = true;
                     boost::archive::xml_iarchive ia(ifs);
                     ia >> boost::serialization::make_nvp("libraries", old_failures);
+                    old_failures_opened = true;
                 }
             }
             else // binary
@@ -831,16 +908,16 @@ int main(int argc, char **argv)
                 std::ifstream ifs("failures.bin", std::ios::binary);
                 if ( ifs.is_open() )
                 {
-                    old_failures_opened = true;
                     boost::archive::binary_iarchive ia(ifs);
                     ia >> boost::serialization::make_nvp("libraries", old_failures);
+                    old_failures_opened = true;
                 }
             }
 
-            if ( ! old_failures_opened )
-            {
+            if ( old_failures_opened )
+                std::cout << "Failures log found." << std::endl;
+            else
                 std::cout << "Failures log not found." << std::endl;
-            }            
         }
         catch (std::exception & e)
         {
@@ -891,9 +968,16 @@ int main(int argc, char **argv)
         }
     }
 
-    // save log
+    // changes tracking enabled
     if ( op.track_changes )
     {
+        std::vector<compared_fail_info> new_errors;
+        std::vector<compared_fail_info> changed_errors;
+        compare_failures_logs(old_failures, failures, new_errors, changed_errors);
+
+        std::cout << "Detected " << new_errors.size() << " new failures." << std::endl;
+        std::cout << "Detected " << changed_errors.size() << " changed failures." << std::endl;
+
         std::cout << "Saving failures log." << std::endl;
 
         try

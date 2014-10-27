@@ -41,6 +41,11 @@ Options:
     --connections arg (=5)  max number of connections [1..100]
     --retries arg (=3)      max number of retries [1..10]
     --branch arg (=develop) branch name {develop, master}
+    --track-changes         compare failures with the previous run
+    --log-format arg (=xml) the format of failures log {xml, binary}
+    --send-report           send an email containing the report about the
+                            failures
+    --save-report           save report to file
     --verbose               show details
     
 ================

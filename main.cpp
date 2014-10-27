@@ -636,9 +636,12 @@ struct fail_info
 
     bool operator<(fail_info const& r) const
     {
-        return runner < r.runner
-                || ( runner == r.runner && toolset < r.toolset
-                    || ( toolset == r.toolset && test_name < r.test_name ) );
+        //return runner < r.runner
+        //        || runner == r.runner && ( toolset < r.toolset
+        //            || toolset == r.toolset && test_name < r.test_name );
+        return test_name < r.test_name
+                || test_name == r.test_name && ( toolset < r.toolset
+                    || toolset == r.toolset && runner < r.runner );
     }
 
     std::string runner;

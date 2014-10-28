@@ -774,6 +774,7 @@ struct compared_fail_info
         : library_it(library_it_)
         , fail_it(fail_it_)
         , previous_fail_it(previous_fail_it_)
+        , is_fail_valid(true)
         , is_previous_valid(true)
     {}
 
@@ -781,12 +782,23 @@ struct compared_fail_info
                        std::set<fail_info>::const_iterator const& fail_it_)
         : library_it(library_it_)
         , fail_it(fail_it_)
+        , is_fail_valid(true)
         , is_previous_valid(false)
+    {}
+
+    compared_fail_info(std::vector<library_fail_info>::const_iterator const& library_it_,
+                       bool,
+                       std::set<fail_info>::const_iterator const& previous_fail_it_)
+        : library_it(library_it_)
+        , previous_fail_it(previous_fail_it_)
+        , is_fail_valid(false)
+        , is_previous_valid(true)
     {}
 
     std::vector<library_fail_info>::const_iterator library_it;
     std::set<fail_info>::const_iterator fail_it;
     std::set<fail_info>::const_iterator previous_fail_it;
+    bool is_fail_valid;
     bool is_previous_valid;
 };
 
@@ -803,8 +815,8 @@ struct is_same_library
 void compare_failures_logs(std::vector<library_fail_info> const& previous_failures,
                            std::vector<library_fail_info> const& current_failures,
                            std::vector<compared_fail_info> & new_errors,
-                           std::vector<compared_fail_info> & changed_errors/*,
-                           std::vector<compared_fail_info> & no_longer_errors*/)
+                           std::vector<compared_fail_info> & changed_errors,
+                           std::vector<compared_fail_info> & no_longer_errors)
 {
     for ( std::vector<library_fail_info>::const_iterator lib_it = current_failures.begin() ;
           lib_it != current_failures.end() ; ++lib_it )
@@ -825,9 +837,11 @@ void compare_failures_logs(std::vector<library_fail_info> const& previous_failur
         }
         else
         {
+            // for each new fail
             for ( std::set<fail_info>::const_iterator fail_it = lib_it->failures.begin() ;
                   fail_it != lib_it->failures.end() ; ++fail_it )
             {
+                // search for the corresponding one from the previous run
                 std::set<fail_info>::const_iterator prev_fail_it = prev_lib_it->failures.find(*fail_it);
 
                 // if the failure wasn't found previously
@@ -845,6 +859,26 @@ void compare_failures_logs(std::vector<library_fail_info> const& previous_failur
                       && fail_it->reason != prev_fail_it->reason )
                     {
                         changed_errors.push_back(compared_fail_info(lib_it, fail_it, prev_fail_it));
+                    }
+                }
+            }
+
+            // for each fail from previous run
+            for ( std::set<fail_info>::const_iterator prev_fail_it = prev_lib_it->failures.begin() ;
+                  prev_fail_it != prev_lib_it->failures.end() ; ++prev_fail_it )
+            {
+                // search for the corresponding one from this run
+                std::set<fail_info>::const_iterator fail_it = lib_it->failures.find(*prev_fail_it);
+
+                // if the failure wasn't found - there is no longer an error
+                // NOTE: actually non-important errors should be checked here
+                // and mentioned in the report (consider e.g. comp->time)
+                if ( fail_it == lib_it->failures.end() )
+                {
+                    // if the reason was important
+                    if ( is_reason_important(prev_fail_it->reason) )
+                    {
+                        no_longer_errors.push_back(compared_fail_info(lib_it, false, prev_fail_it));
                     }
                 }
             }
@@ -891,14 +925,22 @@ void output_errors(std::vector<compared_fail_info> const& errors,
         os << "<tr><td>";
         if ( it->is_previous_valid )
         {
-            os << "<span style=\"" << reason_to_style(it->previous_fail_it->reason) << "\">"
+            os << "<span style=\"text-decoration: line-through; " << reason_to_style(it->previous_fail_it->reason) << "\">"
                << it->previous_fail_it->reason << "</span>";
-            os << "->";
-        }        
-        os << "<span style=\"" << reason_to_style(it->fail_it->reason) << "\">" << it->fail_it->reason << "</span>";
+
+            if ( it->is_fail_valid )
+                os << "->";
+        }
+        if ( it->is_fail_valid )
+        {
+            os << "<span style=\"" << reason_to_style(it->fail_it->reason) << "\">" << it->fail_it->reason << "</span>";
+        }
 
         os << "</td><td>";
-        os << "<a href=\"" << it->fail_it->url << "\">" << it->fail_it->toolset << " (" << it->fail_it->runner << ")</a>";
+        if ( it->is_fail_valid )
+            os << "<a href=\"" << it->fail_it->url << "\">" << it->fail_it->toolset << " (" << it->fail_it->runner << ")</a>";
+        //else if ( it->is_previous_valid )
+        //    os << "<a href=\"" << it->previous_fail_it->url << "\">" << it->previous_fail_it->toolset << " (" << it->previous_fail_it->runner << ")</a>";
         os << "</td></tr>";
 
         prev_library = it->library_it->library;
@@ -915,6 +957,7 @@ void output_errors(std::vector<compared_fail_info> const& errors,
 
 void output_report(std::vector<compared_fail_info> const& new_errors,
                    std::vector<compared_fail_info> const& changed_errors,
+                   std::vector<compared_fail_info> const& no_longer_errors,
                    std::ostream & os)
 {
     // NOTE: errors should be sorted in the following order:
@@ -943,6 +986,12 @@ void output_report(std::vector<compared_fail_info> const& new_errors,
     {
         os << "<h2>Changed errors:</h2>";
         output_errors(changed_errors, os);
+    }
+
+    if ( ! no_longer_errors.empty() )
+    {
+        os << "<h2>Errors dissapeared:</h2>";
+        output_errors(no_longer_errors, os);
     }
 
     os << "</body></html>";
@@ -1095,10 +1144,11 @@ int main(int argc, char **argv)
     {
         std::vector<compared_fail_info> new_errors;
         std::vector<compared_fail_info> changed_errors;
-        compare_failures_logs(old_failures, failures, new_errors, changed_errors);
+        std::vector<compared_fail_info> no_longer_errors;
+        compare_failures_logs(old_failures, failures, new_errors, changed_errors, no_longer_errors);
 
         std::stringstream report_stream;
-        output_report(new_errors, changed_errors, report_stream);
+        output_report(new_errors, changed_errors, no_longer_errors, report_stream);
 
         if ( op.save_report )
         {
@@ -1107,7 +1157,7 @@ int main(int argc, char **argv)
             ofs << report_stream.str();
         }
 
-        if ( op.send_report && ( !op.track_changes || !new_errors.empty() || !changed_errors.empty() ) )
+        if ( op.send_report && ( !op.track_changes || !new_errors.empty() || !changed_errors.empty() || !no_longer_errors.empty() ) )
         {
             mail::config cfg;
             if ( ! cfg.load("mail.cfg") )
@@ -1130,6 +1180,8 @@ int main(int argc, char **argv)
                             subject = "New errors detected!";
                         else if ( !changed_errors.empty() )
                             subject = "Changed errors detected!";
+                        else if ( !no_longer_errors.empty() )
+                            subject = "Errors dissapeared!";
                         else
                             subject = "Errors detected!";
                     }

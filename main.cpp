@@ -939,8 +939,8 @@ void output_errors(std::vector<compared_fail_info> const& errors,
         os << "</td><td>";
         if ( it->is_fail_valid )
             os << "<a href=\"" << it->fail_it->url << "\">" << it->fail_it->toolset << " (" << it->fail_it->runner << ")</a>";
-        //else if ( it->is_previous_valid )
-        //    os << "<a href=\"" << it->previous_fail_it->url << "\">" << it->previous_fail_it->toolset << " (" << it->previous_fail_it->runner << ")</a>";
+        else if ( it->is_previous_valid )
+            os << it->previous_fail_it->toolset << " (" << it->previous_fail_it->runner << ")";
         os << "</td></tr>";
 
         prev_library = it->library_it->library;
@@ -971,9 +971,11 @@ void output_report(std::vector<compared_fail_info> const& new_errors,
        << "</head><body>";
 
     os << "<div style=\"margin:10px;\">"
-       << "Detected " << new_errors.size() << " new failures."
+       << new_errors.size() << " new failures."
        << "<br/>"
-       << "Detected " << changed_errors.size() << " changed failures."
+       << changed_errors.size() << " changed failures."
+       << "<br/>"
+       << no_longer_errors.size() << " failures dissapeared."
        << "</div>";
 
     if ( ! new_errors.empty() )

@@ -510,28 +510,12 @@ struct logs_pool
     std::vector<element> responses;
 };
 
-std::string filename_from_url(std::string const& url)
+std::string find_reason(std::string const& log)
 {
-    return url.substr(url.find_last_of('/') + 1);
-}
-
-void modify_nodes(rapidxml::xml_document<> & doc,
-                  fail_node & n,
-                  std::string const& log,
-                  std::string & reason,
-                  options const& op)
-{
-    if ( op.verbose )
-        std::cout << "Processing: " << filename_from_url(n.log_url) << std::endl;
-    
     // time limit exceeded
     if ( log.find("second time limit exceeded") != std::string::npos )
     {
-        rapidxml::xml_attribute<> * style_attr = doc.allocate_attribute("style", "background-color: #88ff00;");
-        n.td->append_attribute(style_attr);
-
-        reason = "time";
-        set_value(doc, n.a, "time");
+        return "time";
     }
     // File too big or /bigobj
     else if ( ! boost::empty( boost::algorithm::find_regex(
@@ -540,11 +524,7 @@ void modify_nodes(rapidxml::xml_document<> & doc,
                     boost::match_not_dot_newline
                 )) )
     {
-        rapidxml::xml_attribute<> * style_attr = doc.allocate_attribute("style", "background-color: #00ff88;");
-        n.td->append_attribute(style_attr);
-
-        reason = "file";
-        set_value(doc, n.a, "file");
+        return "file";
     }
     // internal compiler error
     else if ( ! boost::empty( boost::algorithm::find_regex(
@@ -553,11 +533,7 @@ void modify_nodes(rapidxml::xml_document<> & doc,
                     boost::match_not_dot_newline
                 )) )
     {
-        rapidxml::xml_attribute<> * style_attr = doc.allocate_attribute("style", "background-color: #ff88ff;");
-        n.td->append_attribute(style_attr);
-
-        reason = "ierr";
-        set_value(doc, n.a, "ierr");
+        return "ierr";
     }
     // compilation failed
     else if ( ! boost::empty( boost::algorithm::find_regex(
@@ -566,11 +542,7 @@ void modify_nodes(rapidxml::xml_document<> & doc,
                     boost::match_not_dot_newline
                 )) )
     {
-        rapidxml::xml_attribute<> * style_attr = doc.allocate_attribute("style", "background-color: #ffbb00;");
-        n.td->append_attribute(style_attr);
-
-        reason = "comp";
-        set_value(doc, n.a, "comp");
+        return "comp";
     }
     // linking failed
     else if ( ! boost::empty( boost::algorithm::find_regex(
@@ -579,11 +551,7 @@ void modify_nodes(rapidxml::xml_document<> & doc,
                     boost::match_not_dot_newline
                 )) )
     {
-        rapidxml::xml_attribute<> * style_attr = doc.allocate_attribute("style", "background-color: #ffdd00;");
-        n.td->append_attribute(style_attr);
-
-        reason = "link";
-        set_value(doc, n.a, "link");
+        return "link";
     }
     // run failed
     else if ( ! boost::empty( boost::algorithm::find_regex(
@@ -592,21 +560,36 @@ void modify_nodes(rapidxml::xml_document<> & doc,
                     boost::match_not_dot_newline
                 )) )
     {
-        rapidxml::xml_attribute<> * style_attr = doc.allocate_attribute("style", "background-color: #ffff00;");
-        n.td->append_attribute(style_attr);
-
-        reason = "run";
-        set_value(doc, n.a, "run");
+        return "run";
     }
+
     // unknown fail
-    else
-    {
-        rapidxml::xml_attribute<> * style_attr = doc.allocate_attribute("style", "background-color: #ffff88;");
-        n.td->append_attribute(style_attr);
+    return "unkn";
+}
 
-        reason = "unkn";
-        set_value(doc, n.a, "unkn");
-    }
+std::string filename_from_url(std::string const& url)
+{
+    return url.substr(url.find_last_of('/') + 1);
+}
+
+std::string reason_to_style(std::string const& reason)
+{
+    if ( reason == "time" )
+        return "background-color: #88ff00;";
+    else if ( reason == "file" )
+        return "background-color: #00ff88;";
+    else if ( reason == "ierr" )
+        return "background-color: #ff88ff;";
+    else if ( reason == "comp")
+        return "background-color: #ffbb00;";
+    else if ( reason == "link" )
+        return "background-color: #ffdd00;";
+    else if ( reason == "run" )
+        return "background-color: #ffff00;";
+    else if ( reason == "unkn" )
+        return "background-color: #ffff88;";
+    else
+        return "";
 }
 
 void process_fail(rapidxml::xml_document<> & doc,
@@ -624,7 +607,15 @@ void process_fail(rapidxml::xml_document<> & doc,
     // set new, global href
     n.href->value( doc.allocate_string(n.log_url.c_str()) );
 
-    modify_nodes(doc, n, log, reason, op);
+    if ( op.verbose )
+        std::cout << "Processing: " << filename_from_url(n.log_url) << std::endl;
+
+    reason = find_reason(log);
+
+    rapidxml::xml_attribute<> * style_attr = doc.allocate_attribute("style", doc.allocate_string(reason_to_style(reason).c_str()));
+    n.td->append_attribute(style_attr);
+
+    set_value(doc, n.a, reason.c_str());
 }
 
 void process_anchor(rapidxml::xml_document<> & doc, anchor_node & n)
@@ -859,20 +850,6 @@ void compare_failures_logs(std::vector<library_fail_info> const& previous_failur
             }
         }
     }
-}
-
-std::string reason_to_style(std::string const& reason)
-{
-    if ( reason == "run" )
-        return "background-color: #ffff00;";
-    else if ( reason == "comp")
-        return "background-color: #ffbb00;";
-    else if ( reason == "link" )
-        return "background-color: #ffdd00;";
-    else if ( reason == "unkn" )    
-        return "background-color: #ffff88;";
-    else
-        return "";
 }
 
 void output_errors(std::vector<compared_fail_info> const& errors,
@@ -1125,6 +1102,7 @@ int main(int argc, char **argv)
 
         if ( op.save_report )
         {
+            std::cout << "Saving report." << std::endl;
             std::ofstream ofs("report.html", std::ios::trunc);
             ofs << report_stream.str();
         }

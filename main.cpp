@@ -510,61 +510,65 @@ struct logs_pool
     std::vector<element> responses;
 };
 
+inline bool find_string(std::string const& str, std::string const& str_to_find)
+{
+    return str.find(str_to_find) != std::string::npos;
+}
+
+inline bool find_regex(std::string const& str, std::string const& regex)
+{
+    return ! boost::empty(
+                boost::algorithm::find_regex(
+                    str,
+                    boost::basic_regex<char>(regex),
+                    boost::match_not_dot_newline
+                ));
+}
+
 std::string find_reason(std::string const& log)
 {
+    // unknown fail
+    std::string result = "unkn";
+
     // time limit exceeded
-    if ( log.find("second time limit exceeded") != std::string::npos )
+    if ( find_string(log, "second time limit exceeded") )
     {
-        return "time";
+        result = "time";
     }
-    // File too big or /bigobj
-    else if ( ! boost::empty( boost::algorithm::find_regex(
-                    log,
-                    boost::basic_regex<char>("((File too big)|(/bigobj))"),
-                    boost::match_not_dot_newline
-                )) )
+    // File too big, /bigobj, No space left on device, etc.
+    else if ( find_regex(log, "((Fatal error: can't write)|(Fatal error: can't close)|(File too big)|(/bigobj))") )
     {
-        return "file";
+        result = "file";
     }
     // internal compiler error
-    else if ( ! boost::empty( boost::algorithm::find_regex(
-                    log,
-                    boost::basic_regex<char>("((internal compiler error)|(internal error))"),
-                    boost::match_not_dot_newline
-                )) )
+    else if ( find_regex(log, "((internal compiler error)|(internal error))") )
     {
-        return "ierr";
+        result = "ierr";
     }
     // compilation failed
-    else if ( ! boost::empty( boost::algorithm::find_regex(
-                    log,
-                    boost::basic_regex<char>("(Compile).+(fail).*$"),
-                    boost::match_not_dot_newline
-                )) )
+    else if ( find_regex(log, "(Compile).+(fail).*$") )
     {
-        return "comp";
+        result = "comp";
     }
     // linking failed
-    else if ( ! boost::empty( boost::algorithm::find_regex(
-                    log,
-                    boost::basic_regex<char>("(Link).+(fail).*$"),
-                    boost::match_not_dot_newline
-                )) )
+    else if ( find_regex(log, "(Link).+(fail).*$") )
     {
-        return "link";
+        result = "link";
     }
     // run failed
-    else if ( ! boost::empty( boost::algorithm::find_regex(
-                    log,
-                    boost::basic_regex<char>("(Run).+(fail).*$"),
-                    boost::match_not_dot_newline
-                )) )
+    else if ( find_regex(log, "(Run).+(fail).*$") )
     {
-        return "run";
+        result = "run";
     }
 
-    // unknown fail
-    return "unkn";
+    // Permission denied
+    if ( ( result == "comp" || result == "link" || result == "unkn" )
+      && find_string(log, "Permission denied") )
+    {
+        result = "perm";
+    }
+
+    return result;
 }
 
 std::string filename_from_url(std::string const& url)
@@ -577,6 +581,8 @@ std::string reason_to_style(std::string const& reason)
     if ( reason == "time" )
         return "background-color: #88ff00;";
     else if ( reason == "file" )
+        return "background-color: #00ff88;";
+    else if ( reason == "perm" )
         return "background-color: #00ff88;";
     else if ( reason == "ierr" )
         return "background-color: #ff88ff;";

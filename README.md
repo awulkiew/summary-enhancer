@@ -18,8 +18,9 @@ Failures list:
  * comp - compilation error
  * link - linking error
  * run - run-time error
- * time - compilation time limit exceeded
- * file - compilation ended with "file too big" error
+ * time - time limit exceeded
+ * file - file too big or not enough space
+ * perm - permission denied
  * ierr - internal compiler error
  * unkn - unknown failure
 

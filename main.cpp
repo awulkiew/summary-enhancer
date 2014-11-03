@@ -1116,8 +1116,16 @@ int main(int argc, char **argv)
             std::ifstream ifs(failures_log_path.c_str(), std::ios::binary);
             if ( ifs.is_open() )
             {
-                boost::archive::binary_iarchive ia(ifs);
-                ia >> boost::serialization::make_nvp("libraries", old_failures);
+                if ( op.log_format == options::xml )
+                {
+                    boost::archive::xml_iarchive ia(ifs);
+                    ia >> boost::serialization::make_nvp("libraries", old_failures);
+                }
+                else
+                {
+                    boost::archive::binary_iarchive ia(ifs);
+                    ia >> boost::serialization::make_nvp("libraries", old_failures);
+                }
                 old_failures_opened = true;
             }
 
@@ -1209,8 +1217,16 @@ int main(int argc, char **argv)
             if ( !ofs.is_open() )
                 throw std::runtime_error("unable to open file");
 
-            boost::archive::xml_oarchive oa(ofs);
-            oa << boost::serialization::make_nvp("libraries", failures);
+            if ( op.log_format == options::xml )
+            {
+                boost::archive::xml_oarchive oa(ofs);
+                oa << boost::serialization::make_nvp("libraries", failures);
+            }
+            else
+            {
+                boost::archive::binary_oarchive oa(ofs);
+                oa << boost::serialization::make_nvp("libraries", failures);
+            }
         }
         catch (std::exception & e)
         {

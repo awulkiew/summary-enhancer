@@ -908,7 +908,13 @@ void output_errors(std::vector<compared_fail_info> const& errors,
             os << "<h3>" << it->library_it->library << "</h3>";
         }
 
-        if ( it->fail_it->test_name != prev_test )
+        std::string test_name;        
+        if ( it->is_fail_valid )
+            test_name = it->fail_it->test_name;
+        else if ( it->is_previous_valid )
+            test_name = it->previous_fail_it->test_name;
+
+        if ( test_name != prev_test )
         {
             if ( ! prev_test.empty() )
             {
@@ -917,7 +923,7 @@ void output_errors(std::vector<compared_fail_info> const& errors,
                 os << "</div>";
             }
             os << "<div style=\"margin:10px;\">";
-            os << "<span style=\"font-weight: bold;\">" << it->fail_it->test_name << "</span>";
+            os << "<span style=\"font-weight: bold;\">" << test_name << "</span>";
             os << "<div style=\"margin:5px;\">";
             os << "<table style=\"border-width: 0px;\">";
         }
@@ -944,7 +950,7 @@ void output_errors(std::vector<compared_fail_info> const& errors,
         os << "</td></tr>";
 
         prev_library = it->library_it->library;
-        prev_test = it->fail_it->test_name;
+        prev_test = test_name;
     }
 
     if ( ! prev_test.empty() )

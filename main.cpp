@@ -849,7 +849,7 @@ void compare_failures_logs(std::vector<library_fail_info> const& previous_failur
                 {
                     // important reason
                     if ( is_reason_important(fail_it->reason) )
-                        new_errors.push_back(compared_fail_info(lib_it, fail_it, prev_fail_it));
+                        new_errors.push_back(compared_fail_info(lib_it, fail_it));
                 }
                 // the failure found
                 else

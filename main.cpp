@@ -15,13 +15,15 @@
 #include <boost/algorithm/string/regex.hpp>
 #include <boost/algorithm/string/trim.hpp>
 #include <boost/filesystem.hpp>
+#include <boost/foreach.hpp>
+#include <boost/optional.hpp>
 #include <boost/program_options.hpp>
 
 #include <boost/archive/xml_iarchive.hpp>
 #include <boost/archive/xml_oarchive.hpp>
 #include <boost/archive/binary_iarchive.hpp>
 #include <boost/archive/binary_oarchive.hpp>
-#include <boost/serialization/set.hpp>
+#include <boost/serialization/map.hpp>
 #include <boost/serialization/vector.hpp>
 
 #include <boost/network.hpp>
@@ -231,6 +233,9 @@ struct fail_node
     std::string log_url;
     std::size_t toolset_index;
     std::string test_name;
+
+    std::string reason;
+    std::string nested_reason;
 };
 
 struct anchor_node
@@ -408,33 +413,34 @@ private:
     }
 };
 
+template <typename It>
 struct logs_pool
 {
     typedef boost::network::http::basic_client<boost::network::http::tags::http_async_8bit_udp_resolve, 1, 1> client_type;
-    typedef std::vector<fail_node>::iterator fail_iterator;
     
     struct element
     {
-        element(fail_iterator it_, client_type::response const& response_)
-            : fail_it(it_), response(response_), counter(0)
+        element(It const& it_, std::string const& url_, client_type::response const& response_)
+            : it(it_), url(url_), response(response_), counter(0)
         {}
 
-        fail_iterator fail_it;
+        It it;
+        std::string url;
         client_type::response response;
         int counter;
     };
 
     struct log_info
     {
-        log_info(fail_iterator it_, std::string const& log_)
-            : fail_it(it_), log(log_)
+        log_info(It const& it_, std::string const& log_)
+            : it(it_), log(log_)
         {}
 
-        fail_iterator fail_it;
+        It it;
         std::string log;
     };
 
-    typedef std::vector<element>::iterator response_iterator;
+    typedef typename std::vector<element>::iterator response_iterator;
 
     logs_pool(options const& op)
         : max_requests(op.connections)
@@ -442,15 +448,16 @@ struct logs_pool
         , verbose(op.verbose)
     {}
 
-    fail_iterator add(fail_iterator first, fail_iterator last)
+    template <typename Url>
+    It add(It first, It last, Url url_get)
     {
         for ( ; first != last && responses.size() < max_requests ; ++first )
         {
-            client_type::request request(first->log_url);
+            client_type::request request(url_get(*first));
             request << boost::network::header("Host", "www.boost.org");
             request << boost::network::header("Connection", "keep-alive");
-            
-            responses.push_back(element(first, client.get(request)));
+
+            responses.push_back(element(first, url_get(*first), client.get(request)));
         }
 
         return first;
@@ -474,7 +481,7 @@ struct logs_pool
                     // re-try
                     if ( it->counter < max_retries )
                     {
-                        client_type::request request(it->fail_it->log_url);
+                        client_type::request request(it->url);
                         request << boost::network::header("Host", "www.boost.org");
                         request << boost::network::header("Connection", "keep-alive");
                         it->response = client.get(request);
@@ -491,7 +498,7 @@ struct logs_pool
                     }
                 }
 
-                *out++ = log_info(it->fail_it, body);
+                *out++ = log_info(it->it, body);
                 it->counter = -1;
             }
         }
@@ -533,7 +540,7 @@ std::string find_reason(std::string const& log)
         return "time";
     }
     // File too big, /bigobj, No space left on device, etc.
-    else if ( find_regex(log, "((Fatal error: can't write)|(Fatal error: can't close)|(File too big)|(/bigobj))") )
+    else if ( find_regex(log, "((Fatal error: can't write)|(Fatal error: can't close)|(File too big)|(/bigobj)|(No matching files were found))") )
     {
         return "file";
     }
@@ -587,10 +594,118 @@ std::string reason_to_style(std::string const& reason)
         return "";
 }
 
+struct fail_id
+{
+    fail_id() {}
+
+    fail_id(std::string const& runner_,
+            std::string const& toolset_,
+            std::string const& test_name_)
+        : runner(runner_)
+        , toolset(toolset_)
+        , test_name(test_name_)
+    {}
+
+    bool operator<(fail_id const& r) const
+    {
+        return test_name < r.test_name
+                || test_name == r.test_name && ( runner < r.runner
+                    || runner == r.runner && toolset < r.toolset );
+    }
+
+    std::string runner;
+    std::string toolset;
+    std::string test_name;
+
+private:
+    template<class Archive>
+    void serialize(Archive & ar, const unsigned int version)
+    {
+        ar & boost::serialization::make_nvp("runner", runner);
+        ar & boost::serialization::make_nvp("toolset", toolset);
+        ar & boost::serialization::make_nvp("test", test_name);
+    }
+
+    friend class boost::serialization::access;
+};
+
+struct fail_data
+{
+    fail_data() {}
+
+    fail_data(std::string const& reason_,
+              std::string const& url_)
+        : reason(reason_)
+        , url(url_)
+    {}
+
+    std::string reason;
+    std::string url;
+
+private:
+    template<class Archive>
+    void serialize(Archive & ar, const unsigned int version)
+    {
+        ar & boost::serialization::make_nvp("reason", reason);
+    }
+
+    friend class boost::serialization::access;
+};
+
+bool is_reason_important(std::string const& reason)
+{
+    return reason == "comp" || reason == "link" || reason == "run" || reason == "unkn";
+}
+
+int reason_importance(std::string const& reason)
+{
+    return reason == "comp" ? 6 :
+           reason == "link" ? 5 :
+           reason == "run"  ? 4 :
+           reason == "unkn" ? 3 :
+           reason == "ierr" ? 2 :
+           reason == "file" ? 1 :
+           reason == "time" ? 0 : -1;
+}
+
+void append_urls_impl(rapidxml::xml_node<> * n, std::vector<std::string> & urls, options const& op)
+{
+    if ( n == NULL )
+        return;
+    
+    if ( name(n) == "a" )
+    {
+        rapidxml::xml_attribute<> * href = n->first_attribute("href");
+        if ( href )
+        {
+            std::string url = value(href);
+            if ( !url.empty() )
+            {
+                urls.push_back(op.branch_url + "output/" + url);
+                //urls.push_back(to_global(url, op.branch_url + "output/"));
+            }
+        }
+    }
+    
+    // depth first
+    append_urls_impl(n->first_node(), urls, op);
+    append_urls_impl(n->next_sibling(), urls, op);
+}
+
+void append_urls(std::string & page, std::vector<std::string> & urls, options const& op)
+{
+    if ( page.empty() )
+        return;
+
+    rapidxml::xml_document<> doc;
+    doc.parse<0>(&page[0]); // non-98-standard but should work
+
+    append_urls_impl(doc.first_node(), urls, op);
+}
+
 void process_fail(rapidxml::xml_document<> & doc,
                   fail_node & n,
-                  std::string const& log,
-                  std::string & reason,
+                  std::string const& reason,
                   options const& op)
 {
     // remove spaces
@@ -605,8 +720,12 @@ void process_fail(rapidxml::xml_document<> & doc,
     if ( op.verbose )
         std::cout << "Processing: " << filename_from_url(n.log_url) << std::endl;
 
-    reason = find_reason(log);
+    // remove old style if needed
+    rapidxml::xml_attribute<> * old_style_attr = n.td->first_attribute("style");
+    if ( old_style_attr )
+        n.td->remove_attribute(old_style_attr);
 
+    // create new style
     rapidxml::xml_attribute<> * style_attr = doc.allocate_attribute("style", doc.allocate_string(reason_to_style(reason).c_str()));
     n.td->append_attribute(style_attr);
 
@@ -619,57 +738,35 @@ void process_anchor(rapidxml::xml_document<> & doc, anchor_node & n)
     n.href->value( doc.allocate_string(n.url.c_str()) );
 }
 
-struct fail_info
+struct nested_failure
 {
-    fail_info() {}
-
-    fail_info(std::string const& runner_,
-              std::string const& toolset_,
-              std::string const& test_name_,
-              std::string const& reason_,
-              std::string const& url_)
-        : runner(runner_)
-        , toolset(toolset_)
-        , test_name(test_name_)
-        , reason(reason_)
+    nested_failure(nodes_containers::fails_iterator fail_it_,
+                   std::string url_,
+                   boost::optional<std::map<fail_id, fail_data>::iterator> const& failure_it_)
+        : fail_it(fail_it_)
         , url(url_)
+        , failure_it(failure_it_)
     {}
 
-    bool operator<(fail_info const& r) const
-    {
-        return test_name < r.test_name
-                || test_name == r.test_name && ( runner < r.runner
-                    || runner == r.runner && toolset < r.toolset );
-    }
-
-    std::string runner;
-    std::string toolset;
-    std::string test_name;
-    std::string reason;
+    nodes_containers::fails_iterator fail_it;
     std::string url;
-
-private:
-    template<class Archive>
-    void serialize(Archive & ar, const unsigned int version)
-    {
-        ar & boost::serialization::make_nvp("runner", runner);
-        ar & boost::serialization::make_nvp("toolset", toolset);
-        ar & boost::serialization::make_nvp("test", test_name);
-        ar & boost::serialization::make_nvp("reason", reason);
-    }
-
-    friend class boost::serialization::access;
+    boost::optional<std::map<fail_id, fail_data>::iterator> failure_it;
 };
 
-bool is_reason_important(std::string const& reason)
+std::string const& fail_node_to_url(fail_node const& f)
 {
-    return reason == "comp" || reason == "link" || reason == "run" || reason == "unkn";
+    return f.log_url;
+}
+
+std::string const& nested_failure_to_url(nested_failure const& f)
+{
+    return f.url;
 }
 
 void process_document(std::string const& library_name,
                       std::string & in,
                       std::string & out,
-                      std::set<fail_info> & failures,
+                      std::map<fail_id, fail_data> & failures,
                       options const& op)
 {
     out.clear();
@@ -681,51 +778,127 @@ void process_document(std::string const& library_name,
 
     nodes_containers nodes(doc, op);
     
+    std::vector<nested_failure> nested_failures;
+
     // process fails
-
-    logs_pool pool(op);
-    
-    nodes_containers::fails_iterator it = nodes.fails.begin();    
-
-    while ( it != nodes.fails.end() || !pool.responses.empty() )
     {
-        // new portion of logs
-        nodes_containers::fails_iterator new_it = pool.add(it, nodes.fails.end());
+        typedef logs_pool<nodes_containers::fails_iterator> logs_pool_t;
 
-        // print log names
-        if ( op.verbose )
+        logs_pool_t pool(op);
+    
+        nodes_containers::fails_iterator it = nodes.fails.begin();
+
+        while ( it != nodes.fails.end() || !pool.responses.empty() )
         {
-            for ( ; it != new_it ; ++it )
-                std::cout << "Downloading: " << filename_from_url(it->log_url) << std::endl;
-        }
+            // new portion of logs
+            nodes_containers::fails_iterator new_it = pool.add(it, nodes.fails.end(), fail_node_to_url);
 
-        // move "it" iterator to a new position
-        it = new_it;
-
-        // wait a while
-        boost::this_thread::sleep(boost::posix_time::milliseconds(100));
-
-        // get downloaded logs
-        std::vector<logs_pool::log_info> logs;
-        pool.get(std::back_inserter(logs));
-
-        for ( std::vector<logs_pool::log_info>::iterator log_it = logs.begin() ;
-              log_it != logs.end() ; ++log_it )
-        {
-            std::string reason;
-            process_fail(doc, *(log_it->fail_it), log_it->log, reason, op);
-
-            if ( op.track_changes || op.save_report || op.send_report )
+            // print log names
+            if ( op.verbose )
             {
-                // log only "important" errors
-                if ( is_reason_important(reason) )
+                for ( ; it != new_it ; ++it )
+                    std::cout << "Downloading: " << filename_from_url(it->log_url) << std::endl;
+            }
+
+            // move "it" iterator to a new position
+            it = new_it;
+
+            // wait a while
+            boost::this_thread::sleep(boost::posix_time::milliseconds(100));
+
+            // get downloaded logs
+            std::vector<logs_pool_t::log_info> logs;
+            pool.get(std::back_inserter(logs));
+
+            for ( std::vector<logs_pool_t::log_info>::iterator log_it = logs.begin() ;
+                  log_it != logs.end() ; ++log_it )
+            {
+                std::string reason = find_reason(log_it->log);
+                log_it->it->reason = reason;
+
+                boost::optional<std::map<fail_id, fail_data>::iterator> new_failure_it;
+
+                process_fail(doc, *(log_it->it), reason, op);
+
+                if ( op.track_changes || op.save_report || op.send_report )
                 {
-                    failures.insert(fail_info(
-                        nodes.runners[log_it->fail_it->toolset_index],
-                        nodes.toolsets[log_it->fail_it->toolset_index],
-                        log_it->fail_it->test_name,
-                        reason,
-                        log_it->fail_it->log_url));
+                    // log only "important" errors
+                    if ( is_reason_important(reason) )
+                    {
+                        new_failure_it
+                            = failures.insert(std::make_pair(
+                                fail_id(nodes.runners[log_it->it->toolset_index],
+                                        nodes.toolsets[log_it->it->toolset_index],
+                                        log_it->it->test_name),
+                                fail_data(reason,
+                                          log_it->it->log_url))).first;
+                    }
+                }
+
+                if ( reason == "unkn" )
+                {
+                    std::vector<std::string> urls;
+                    append_urls(log_it->log, urls, op);
+                    BOOST_FOREACH(std::string const& url, urls)
+                    {
+                        nested_failures.push_back(nested_failure(
+                                log_it->it,
+                                url,
+                                new_failure_it));
+                    }
+                }
+
+            }
+        }
+    }
+
+    // process nested failures
+    {
+        typedef logs_pool<std::vector<nested_failure>::iterator> logs_pool_t;
+
+        logs_pool_t pool(op);
+
+        std::vector<nested_failure>::iterator it = nested_failures.begin();
+
+        while ( it != nested_failures.end() || !pool.responses.empty() )
+        {
+            // new portion of logs
+            std::vector<nested_failure>::iterator new_it = pool.add(it, nested_failures.end(), nested_failure_to_url);
+
+            // print log names
+            if ( op.verbose )
+            {
+                for ( ; it != new_it ; ++it )
+                    std::cout << "Downloading: " << filename_from_url(it->url) << std::endl;
+            }
+
+            // move "it" iterator to a new position
+            it = new_it;
+
+            // wait a while
+            boost::this_thread::sleep(boost::posix_time::milliseconds(100));
+
+            // get downloaded logs
+            std::vector<logs_pool_t::log_info> logs;
+            pool.get(std::back_inserter(logs));
+
+            for ( std::vector<logs_pool_t::log_info>::iterator log_it = logs.begin() ;
+                log_it != logs.end() ; ++log_it )
+            {
+                std::string reason = find_reason(log_it->log);
+
+                if ( /*log_it->it->fail_it->reason == "unkn" &&*/
+                     reason_importance(reason)
+                        > reason_importance(log_it->it->fail_it->nested_reason) )
+                {
+                    log_it->it->fail_it->nested_reason = reason;
+
+                    process_fail(doc, *(log_it->it->fail_it), reason, op);
+
+                    if ( log_it->it->failure_it )
+                    {
+                        (*(log_it->it->failure_it))->second.reason = reason;
+                    }
                 }
             }
         }
@@ -746,7 +919,7 @@ void process_document(std::string const& library_name,
 struct library_fail_info
 {
     std::string library;
-    std::set<fail_info> failures;
+    std::map<fail_id, fail_data> failures;
 
 private:
     template<class Archive>
@@ -764,8 +937,8 @@ struct compared_fail_info
     compared_fail_info() {}
 
     compared_fail_info(std::vector<library_fail_info>::const_iterator const& library_it_,
-                       std::set<fail_info>::const_iterator const& fail_it_,
-                       std::set<fail_info>::const_iterator const& previous_fail_it_)
+                       std::map<fail_id, fail_data>::const_iterator const& fail_it_,
+                       std::map<fail_id, fail_data>::const_iterator const& previous_fail_it_)
         : library_it(library_it_)
         , fail_it(fail_it_)
         , previous_fail_it(previous_fail_it_)
@@ -774,7 +947,7 @@ struct compared_fail_info
     {}
 
     compared_fail_info(std::vector<library_fail_info>::const_iterator const& library_it_,
-                       std::set<fail_info>::const_iterator const& fail_it_)
+                       std::map<fail_id, fail_data>::const_iterator const& fail_it_)
         : library_it(library_it_)
         , fail_it(fail_it_)
         , is_fail_valid(true)
@@ -783,7 +956,7 @@ struct compared_fail_info
 
     compared_fail_info(std::vector<library_fail_info>::const_iterator const& library_it_,
                        bool,
-                       std::set<fail_info>::const_iterator const& previous_fail_it_)
+                       std::map<fail_id, fail_data>::const_iterator const& previous_fail_it_)
         : library_it(library_it_)
         , previous_fail_it(previous_fail_it_)
         , is_fail_valid(false)
@@ -791,8 +964,8 @@ struct compared_fail_info
     {}
 
     std::vector<library_fail_info>::const_iterator library_it;
-    std::set<fail_info>::const_iterator fail_it;
-    std::set<fail_info>::const_iterator previous_fail_it;
+    std::map<fail_id, fail_data>::const_iterator fail_it;
+    std::map<fail_id, fail_data>::const_iterator previous_fail_it;
     bool is_fail_valid;
     bool is_previous_valid;
 };
@@ -824,7 +997,7 @@ void compare_failures_logs(std::vector<library_fail_info> const& previous_failur
         // previous log not found - treat failures as new
         if ( prev_lib_it == previous_failures.end() )
         {
-            for ( std::set<fail_info>::const_iterator fail_it = lib_it->failures.begin() ;
+            for ( std::map<fail_id, fail_data>::const_iterator fail_it = lib_it->failures.begin() ;
                   fail_it != lib_it->failures.end() ; ++fail_it )
             {
                 new_errors.push_back(compared_fail_info(lib_it, fail_it));
@@ -833,25 +1006,25 @@ void compare_failures_logs(std::vector<library_fail_info> const& previous_failur
         else
         {
             // for each new fail
-            for ( std::set<fail_info>::const_iterator fail_it = lib_it->failures.begin() ;
+            for ( std::map<fail_id, fail_data>::const_iterator fail_it = lib_it->failures.begin() ;
                   fail_it != lib_it->failures.end() ; ++fail_it )
             {
                 // search for the corresponding one from the previous run
-                std::set<fail_info>::const_iterator prev_fail_it = prev_lib_it->failures.find(*fail_it);
+                std::map<fail_id, fail_data>::const_iterator prev_fail_it = prev_lib_it->failures.find(fail_it->first);
 
                 // if the failure wasn't found previously
                 if ( prev_fail_it == prev_lib_it->failures.end() )
                 {
                     // important reason
-                    if ( is_reason_important(fail_it->reason) )
+                    if ( is_reason_important(fail_it->second.reason) )
                         new_errors.push_back(compared_fail_info(lib_it, fail_it));
                 }
                 // the failure found
                 else
                 {
                     // important reason and different than previously
-                    if ( is_reason_important(fail_it->reason)
-                      && fail_it->reason != prev_fail_it->reason )
+                    if ( is_reason_important(fail_it->second.reason)
+                      && fail_it->second.reason != prev_fail_it->second.reason )
                     {
                         changed_errors.push_back(compared_fail_info(lib_it, fail_it, prev_fail_it));
                     }
@@ -859,11 +1032,11 @@ void compare_failures_logs(std::vector<library_fail_info> const& previous_failur
             }
 
             // for each fail from previous run
-            for ( std::set<fail_info>::const_iterator prev_fail_it = prev_lib_it->failures.begin() ;
+            for ( std::map<fail_id, fail_data>::const_iterator prev_fail_it = prev_lib_it->failures.begin() ;
                   prev_fail_it != prev_lib_it->failures.end() ; ++prev_fail_it )
             {
                 // search for the corresponding one from this run
-                std::set<fail_info>::const_iterator fail_it = lib_it->failures.find(*prev_fail_it);
+                std::map<fail_id, fail_data>::const_iterator fail_it = lib_it->failures.find(prev_fail_it->first);
 
                 // if the failure wasn't found - there is no longer an error
                 // NOTE: actually non-important errors should be checked here
@@ -871,7 +1044,7 @@ void compare_failures_logs(std::vector<library_fail_info> const& previous_failur
                 if ( fail_it == lib_it->failures.end() )
                 {
                     // if the reason was important
-                    if ( is_reason_important(prev_fail_it->reason) )
+                    if ( is_reason_important(prev_fail_it->second.reason) )
                     {
                         no_longer_errors.push_back(compared_fail_info(lib_it, false, prev_fail_it));
                     }
@@ -905,9 +1078,9 @@ void output_errors(std::vector<compared_fail_info> const& errors,
 
         std::string test_name;        
         if ( it->is_fail_valid )
-            test_name = it->fail_it->test_name;
+            test_name = it->fail_it->first.test_name;
         else if ( it->is_previous_valid )
-            test_name = it->previous_fail_it->test_name;
+            test_name = it->previous_fail_it->first.test_name;
 
         if ( test_name != prev_test )
         {
@@ -926,22 +1099,22 @@ void output_errors(std::vector<compared_fail_info> const& errors,
         os << "<tr><td>";
         if ( it->is_previous_valid )
         {
-            os << "<span style=\"text-decoration: line-through; " << reason_to_style(it->previous_fail_it->reason) << "\">"
-               << it->previous_fail_it->reason << "</span>";
+            os << "<span style=\"text-decoration: line-through; " << reason_to_style(it->previous_fail_it->second.reason) << "\">"
+               << it->previous_fail_it->second.reason << "</span>";
 
             if ( it->is_fail_valid )
                 os << "->";
         }
         if ( it->is_fail_valid )
         {
-            os << "<span style=\"" << reason_to_style(it->fail_it->reason) << "\">" << it->fail_it->reason << "</span>";
+            os << "<span style=\"" << reason_to_style(it->fail_it->second.reason) << "\">" << it->fail_it->second.reason << "</span>";
         }
 
         os << "</td><td>";
         if ( it->is_fail_valid )
-            os << "<a href=\"" << it->fail_it->url << "\">" << it->fail_it->toolset << " (" << it->fail_it->runner << ")</a>";
+            os << "<a href=\"" << it->fail_it->second.url << "\">" << it->fail_it->first.toolset << " (" << it->fail_it->first.runner << ")</a>";
         else if ( it->is_previous_valid )
-            os << it->previous_fail_it->toolset << " (" << it->previous_fail_it->runner << ")";
+            os << it->previous_fail_it->first.toolset << " (" << it->previous_fail_it->first.runner << ")";
         os << "</td></tr>";
 
         prev_library = it->library_it->library;

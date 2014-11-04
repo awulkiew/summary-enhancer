@@ -934,40 +934,21 @@ private:
 
 struct compared_fail_info
 {
+    typedef boost::optional<std::map<fail_id, fail_data>::const_iterator> optional_fail_iterator;
+
     compared_fail_info() {}
 
     compared_fail_info(std::vector<library_fail_info>::const_iterator const& library_it_,
-                       std::map<fail_id, fail_data>::const_iterator const& fail_it_,
-                       std::map<fail_id, fail_data>::const_iterator const& previous_fail_it_)
+                       optional_fail_iterator const& fail_it_ = boost::none,
+                       optional_fail_iterator const& previous_fail_it_ = boost::none)
         : library_it(library_it_)
         , fail_it(fail_it_)
         , previous_fail_it(previous_fail_it_)
-        , is_fail_valid(true)
-        , is_previous_valid(true)
     {}
-
-    compared_fail_info(std::vector<library_fail_info>::const_iterator const& library_it_,
-                       std::map<fail_id, fail_data>::const_iterator const& fail_it_)
-        : library_it(library_it_)
-        , fail_it(fail_it_)
-        , is_fail_valid(true)
-        , is_previous_valid(false)
-    {}
-
-    compared_fail_info(std::vector<library_fail_info>::const_iterator const& library_it_,
-                       bool,
-                       std::map<fail_id, fail_data>::const_iterator const& previous_fail_it_)
-        : library_it(library_it_)
-        , previous_fail_it(previous_fail_it_)
-        , is_fail_valid(false)
-        , is_previous_valid(true)
-    {}
-
+    
     std::vector<library_fail_info>::const_iterator library_it;
-    std::map<fail_id, fail_data>::const_iterator fail_it;
-    std::map<fail_id, fail_data>::const_iterator previous_fail_it;
-    bool is_fail_valid;
-    bool is_previous_valid;
+    optional_fail_iterator fail_it;
+    optional_fail_iterator previous_fail_it;
 };
 
 struct is_same_library
@@ -1046,7 +1027,7 @@ void compare_failures_logs(std::vector<library_fail_info> const& previous_failur
                     // if the reason was important
                     if ( is_reason_important(prev_fail_it->second.reason) )
                     {
-                        no_longer_errors.push_back(compared_fail_info(lib_it, false, prev_fail_it));
+                        no_longer_errors.push_back(compared_fail_info(lib_it, boost::none, prev_fail_it));
                     }
                 }
             }
@@ -1077,10 +1058,10 @@ void output_errors(std::vector<compared_fail_info> const& errors,
         }
 
         std::string test_name;        
-        if ( it->is_fail_valid )
-            test_name = it->fail_it->first.test_name;
-        else if ( it->is_previous_valid )
-            test_name = it->previous_fail_it->first.test_name;
+        if ( it->fail_it )
+            test_name = (*it->fail_it)->first.test_name;
+        else if ( it->previous_fail_it )
+            test_name = (*it->previous_fail_it)->first.test_name;
 
         if ( test_name != prev_test )
         {
@@ -1097,24 +1078,24 @@ void output_errors(std::vector<compared_fail_info> const& errors,
         }
 
         os << "<tr><td>";
-        if ( it->is_previous_valid )
+        if ( it->previous_fail_it )
         {
-            os << "<span style=\"text-decoration: line-through; " << reason_to_style(it->previous_fail_it->second.reason) << "\">"
-               << it->previous_fail_it->second.reason << "</span>";
+            os << "<span style=\"text-decoration: line-through; " << reason_to_style((*it->previous_fail_it)->second.reason) << "\">"
+               << (*it->previous_fail_it)->second.reason << "</span>";
 
-            if ( it->is_fail_valid )
+            if ( it->fail_it )
                 os << "->";
         }
-        if ( it->is_fail_valid )
+        if ( it->fail_it )
         {
-            os << "<span style=\"" << reason_to_style(it->fail_it->second.reason) << "\">" << it->fail_it->second.reason << "</span>";
+            os << "<span style=\"" << reason_to_style((*it->fail_it)->second.reason) << "\">" << (*it->fail_it)->second.reason << "</span>";
         }
 
         os << "</td><td>";
-        if ( it->is_fail_valid )
-            os << "<a href=\"" << it->fail_it->second.url << "\">" << it->fail_it->first.toolset << " (" << it->fail_it->first.runner << ")</a>";
-        else if ( it->is_previous_valid )
-            os << it->previous_fail_it->first.toolset << " (" << it->previous_fail_it->first.runner << ")";
+        if ( it->fail_it )
+            os << "<a href=\"" << (*it->fail_it)->second.url << "\">" << (*it->fail_it)->first.toolset << " (" << (*it->fail_it)->first.runner << ")</a>";
+        else if ( it->previous_fail_it )
+            os << (*it->previous_fail_it)->first.toolset << " (" << (*it->previous_fail_it)->first.runner << ")";
         os << "</td></tr>";
 
         prev_library = it->library_it->library;

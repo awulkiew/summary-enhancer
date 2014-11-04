@@ -1228,12 +1228,16 @@ int main(int argc, char **argv)
             std::string const& lib = *it;
             std::string url = op.view_url + lib + "_.html";
 
-            std::cout << "Downloading: " << lib << std::endl;
+            if ( op.verbose )
+                std::cout << "Downloading: " << lib << std::endl;
+            else
+                std::cout << "Processing: " << lib << std::endl;
 
             // download the summary page
             std::string body = get_document(url);
 
-            std::cout << "Processing." << std::endl;
+            if ( op.verbose )
+                std::cout << "Processing: " << lib << std::endl;
 
             // process the summary page
             std::string processed_body;

@@ -527,48 +527,39 @@ inline bool find_regex(std::string const& str, std::string const& regex)
 
 std::string find_reason(std::string const& log)
 {
-    // unknown fail
-    std::string result = "unkn";
-
     // time limit exceeded
     if ( find_string(log, "second time limit exceeded") )
     {
-        result = "time";
+        return "time";
     }
     // File too big, /bigobj, No space left on device, etc.
     else if ( find_regex(log, "((Fatal error: can't write)|(Fatal error: can't close)|(File too big)|(/bigobj))") )
     {
-        result = "file";
+        return "file";
     }
     // internal compiler error
     else if ( find_regex(log, "((internal compiler error)|(internal error))") )
     {
-        result = "ierr";
+        return "ierr";
     }
     // compilation failed
     else if ( find_regex(log, "(Compile).+(fail).*$") )
     {
-        result = "comp";
+        return "comp";
     }
     // linking failed
     else if ( find_regex(log, "(Link).+(fail).*$") )
     {
-        result = "link";
+        return "link";
     }
     // run failed
     else if ( find_regex(log, "(Run).+(fail).*$") )
     {
-        result = "run";
+        return "run";
     }
 
-    // Permission denied
-    if ( ( result == "comp" || result == "link" || result == "unkn" )
-      && find_string(log, "Permission denied") )
-    {
-        result = "perm";
-    }
-
-    return result;
+    // unknown fail
+    return "unkn";
 }
 
 std::string filename_from_url(std::string const& url)
@@ -581,8 +572,6 @@ std::string reason_to_style(std::string const& reason)
     if ( reason == "time" )
         return "background-color: #88ff00;";
     else if ( reason == "file" )
-        return "background-color: #00ff88;";
-    else if ( reason == "perm" )
         return "background-color: #00ff88;";
     else if ( reason == "ierr" )
         return "background-color: #ff88ff;";

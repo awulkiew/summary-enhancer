@@ -697,10 +697,17 @@ void append_urls(std::string & page, std::vector<std::string> & urls, options co
     if ( page.empty() )
         return;
 
-    rapidxml::xml_document<> doc;
-    doc.parse<0>(&page[0]); // non-98-standard but should work
+    try
+    {
+        rapidxml::xml_document<> doc;
+        doc.parse<0>(&page[0]); // non-98-standard but should work
 
-    append_urls_impl(doc.first_node(), urls, op);
+        append_urls_impl(doc.first_node(), urls, op);
+    }
+    catch (...)
+    {
+        // probably not a HTML/XML file
+    }
 }
 
 void process_fail(rapidxml::xml_document<> & doc,
@@ -858,6 +865,8 @@ void process_document(std::string const& library_name,
 
         logs_pool_t pool(op);
 
+        std::vector<fail_id> modified_failures_ids;
+
         std::vector<nested_failure>::iterator it = nested_failures.begin();
 
         while ( it != nested_failures.end() || !pool.responses.empty() )
@@ -897,9 +906,21 @@ void process_document(std::string const& library_name,
 
                     if ( log_it->it->failure_it )
                     {
+                        modified_failures_ids.push_back((*log_it->it->failure_it)->first);
                         (*(log_it->it->failure_it))->second.reason = reason;
                     }
                 }
+            }
+        }
+
+        // remove failures (from log) that are no longer important
+        BOOST_FOREACH(fail_id const& fid, modified_failures_ids)
+        {
+            std::map<fail_id, fail_data>::iterator it = failures.find(fid);
+            if ( it != failures.end()
+              && ! is_reason_important(it->second.reason) )
+            {
+                failures.erase(it);
             }
         }
     }

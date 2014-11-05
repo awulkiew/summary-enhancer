@@ -20,7 +20,6 @@ Failures list:
  * run - run-time error
  * time - time limit exceeded
  * file - file too big or not enough space
- * perm - permission denied
  * ierr - internal compiler error
  * unkn - unknown failure
 

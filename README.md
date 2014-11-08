@@ -46,6 +46,7 @@ Options:
     --send-report           send an email containing the report about the
                             failures
     --save-report           save report to file
+    --output-dir arg (=./)  the directory for enhanced summary pages and report
     --verbose               show details
     
 ================

@@ -41,6 +41,7 @@ struct options
         , send_report(false)
         , save_report(false)
         , log_format(xml)
+        , output_dir("./")
         , connections(5)
         , retries(3)
         , tests_url("http://www.boost.org/development/tests/")
@@ -54,6 +55,12 @@ struct options
     {
         branch_url = tests_url + branch + "/";
         view_url = branch_url + view + "/";
+
+        if ( output_dir.empty() )
+            output_dir = "./";
+        char b = output_dir.back();
+        if ( b != '/' && b != '\\' )
+            output_dir += '/';
     }
 
     bool verbose;
@@ -62,6 +69,7 @@ struct options
     bool send_report;
     bool save_report;
     enum { binary, xml } log_format;
+    std::string output_dir;
 
     unsigned short connections;
     unsigned short retries;
@@ -95,6 +103,7 @@ bool process_options(int argc, char **argv, options & op)
         ("log-format", po::value<std::string>()->default_value("xml"), "the format of failures log {xml, binary}")
         ("send-report", "send an email containing the report about the failures")
         ("save-report", "save report to file")
+        ("output-dir", po::value<std::string>()->default_value(op.output_dir), "the directory for enhanced summary pages and report")
         ("verbose", "show details")
         ;
 
@@ -157,6 +166,8 @@ bool process_options(int argc, char **argv, options & op)
         result = false;
     }
     op.branch = b;
+
+    op.output_dir = vm["output-dir"].as<std::string>();
 
     op.refresh();
 
@@ -1194,7 +1205,8 @@ int main(int argc, char **argv)
     try
     {
         // download CSS file if needed
-        boost::filesystem::path css_path = "master.css";
+        std::string css_path_str = op.output_dir + "master.css";
+        boost::filesystem::path css_path = css_path_str;
         if ( !boost::filesystem::exists(css_path) )
         {
             std::cout << "Downloading style." << std::endl;
@@ -1202,7 +1214,7 @@ int main(int argc, char **argv)
             try
             {
                 std::string body = get_document("http://www.boost.org/development/tests/develop/master.css");
-                std::ofstream of("master.css", std::ios::trunc);
+                std::ofstream of(css_path_str, std::ios::trunc);
                 of << body;
             }
             catch (std::exception & e)
@@ -1218,7 +1230,7 @@ int main(int argc, char **argv)
         }
 
         // create output directory if needed
-        boost::filesystem::path result_path = "result";
+        boost::filesystem::path result_path = op.output_dir + "pages";
         if ( !boost::filesystem::exists(result_path) )
         {
             std::cout << "Creating output directory." << std::endl;
@@ -1270,7 +1282,7 @@ int main(int argc, char **argv)
             failures[std::distance(op.libraries.begin(), it)].library = lib;
 
             // save processed summary page
-            std::string of_name = std::string("result/") + op.branch + '-' + lib + ".html";
+            std::string of_name = op.output_dir + "pages/" + op.branch + '-' + lib + ".html";
             std::ofstream of(of_name.c_str(), std::ios::trunc);
             of << processed_body;
             of.close();
@@ -1343,7 +1355,7 @@ int main(int argc, char **argv)
         if ( op.save_report )
         {
             std::cout << "Saving report." << std::endl;
-            std::ofstream ofs("report.html", std::ios::trunc);
+            std::ofstream ofs(op.output_dir + "report.html", std::ios::trunc);
             ofs << report_stream.str();
         }
 

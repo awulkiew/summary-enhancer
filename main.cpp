@@ -226,14 +226,14 @@ void set_value(rapidxml::xml_document<> & doc, NorA * n, const char* v)
         n->first_node("")->value(cstr);
 }
 
-struct fail_node
+struct log_node
 {
-    fail_node(rapidxml::xml_node<> * td_,
-              rapidxml::xml_node<> * a_,
-              rapidxml::xml_attribute<> * href_,
-              std::string const& log_url_,
-              std::size_t toolset_index_,
-              std::string const& test_name_)
+    log_node(rapidxml::xml_node<> * td_,
+             rapidxml::xml_node<> * a_,
+             rapidxml::xml_attribute<> * href_,
+             std::string const& log_url_,
+             std::size_t toolset_index_,
+             std::string const& test_name_)
         : td(td_), a(a_), href(href_), log_url(log_url_)
         , toolset_index(toolset_index_)
         , test_name(test_name_)
@@ -244,7 +244,20 @@ struct fail_node
     std::string log_url;
     std::size_t toolset_index;
     std::string test_name;
+};
 
+struct fail_node
+    : log_node
+{
+    fail_node(rapidxml::xml_node<> * td_,
+              rapidxml::xml_node<> * a_,
+              rapidxml::xml_attribute<> * href_,
+              std::string const& log_url_,
+              std::size_t toolset_index_,
+              std::string const& test_name_)
+        : log_node(td_, a_, href_, log_url_, toolset_index_, test_name_)
+    {}
+    
     std::string reason;
     std::string nested_reason;
 };
@@ -278,6 +291,9 @@ std::string to_global(std::string const& url, std::string const& global_prefix)
 
 struct nodes_containers
 {
+    typedef std::vector<log_node> passes_container;
+    typedef passes_container::iterator passes_iterator;
+
     typedef std::vector<fail_node> fails_container;
     typedef fails_container::iterator fails_iterator;
 
@@ -293,6 +309,7 @@ struct nodes_containers
         gather_nodes(doc.first_node(), op, state);
     }
 
+    passes_container passes;
     fails_container fails;
     anchors_container non_log_anchors;
 
@@ -380,8 +397,38 @@ private:
                     if ( href_attr )
                     {
                         // "fail link"
-                        std::string global_href = to_global(value(href_attr), op.branch_url);
+                        std::string href_raw = value(href_attr);
+                        if ( boost::ends_with(href_raw, "variants_.html") )
+                            href_raw.erase(href_raw.end() - 6);
+                        if ( !boost::starts_with(href_raw, "output/") )
+                            href_raw = std::string("output/") + href_raw;
+                        std::string global_href = to_global(href_raw, op.branch_url);
                         fails.push_back(fail_node(n, anch, href_attr, global_href, state.toolset_index, state.test_name));
+                    }
+                }
+
+                ++state.toolset_index;
+            }
+            else if ( "library-success-expected" == class_name )
+            {
+                if ( state.toolset_index >= toolsets.size() )
+                    throw std::runtime_error("unexpected toolsets/tests number");
+
+                // "pass" <a>
+                rapidxml::xml_node<> * anch = n->first_node("a");
+                if ( anch )
+                {
+                    rapidxml::xml_attribute<> * href_attr = anch->first_attribute("href");
+                    if ( href_attr )
+                    {
+                        // "pass link"
+                        std::string href_raw = value(href_attr);
+                        if ( boost::ends_with(href_raw, "variants_.html") )
+                            href_raw.erase(href_raw.end() - 6);
+                        if ( !boost::starts_with(href_raw, "output/") )
+                            href_raw = std::string("output/") + href_raw;
+                        std::string global_href = to_global(href_raw, op.branch_url);
+                        passes.push_back(log_node(n, anch, href_attr, global_href, state.toolset_index, state.test_name));
                     }
                 }
 
@@ -750,6 +797,21 @@ void process_fail(rapidxml::xml_document<> & doc,
     set_value(doc, n.a, reason.c_str());
 }
 
+void process_pass(rapidxml::xml_document<> & doc,
+                  log_node & n)
+{
+    // remove spaces
+    while ( n.td->first_node("") )
+    {
+        n.td->remove_node(n.td->first_node(""));
+    }
+
+    // set new, global href
+    n.href->value( doc.allocate_string(n.log_url.c_str()) );
+
+    set_value(doc, n.a, "pass");
+}
+
 void process_anchor(rapidxml::xml_document<> & doc, anchor_node & n)
 {
     // set new, global href
@@ -934,6 +996,13 @@ void process_document(std::string const& library_name,
                 failures.erase(it);
             }
         }
+    }
+
+    // process passes
+    for ( nodes_containers::passes_iterator p_it = nodes.passes.begin() ;
+          p_it != nodes.passes.end() ; ++p_it )
+    {
+        process_pass(doc, *p_it);
     }
 
     // process anchors

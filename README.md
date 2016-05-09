@@ -1,3 +1,9 @@
+****
+
+The test results are now enhanced by Boost.Regression. This code was left here for historical purposes and won't be updated.
+
+****
+
 summary-enhancer
 ================
 
